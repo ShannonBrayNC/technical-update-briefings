@@ -19,11 +19,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, cast, Union 
 import traceback  # only if you log tracebacks; harmless otherwise
 from bs4 import BeautifulSoup
-from bs4.element import BsTag, NavigableString, PageElement
+from bs4.element import Tag, NavigableString, PageElement
 import re
 
 
-SoupEl = Union[BsTag, NavigableString, PageElement, str]
+SoupEl = Union[Tag, NavigableString, PageElement, str]
 
 # python-pptx
 import pptx
@@ -62,6 +62,8 @@ class Item:
 # -------------------------
 # Small safe helpers (single definitions)
 # -------------------------
+
+
 def _clean(s: Any) -> str:
     """Coerce bs4 attribute or text into a plain string."""
     if s is None:
@@ -71,21 +73,13 @@ def _clean(s: Any) -> str:
         return " ".join(_clean(x) for x in s if x is not None).strip()
     return str(s).strip()
 
-def _txt(x: Any) -> str:
-    """Return visible text from a bs4 node (Tag/PageElement/NavigableString/str/None)."""
-    if x is None:
-        return ""
-    try:
-        # bs4 Tag/PageElement/NavigableString
-        if hasattr(x, "get_text"):
-            return x.get_text(" ", strip=True)  # type: ignore[attr-defined]
-        # already a string
-        if isinstance(x, str):
-            return x.strip()
-        # last resort
-        return str(x).strip()
-    except Exception:
-        return str(x).strip() if x is not None else ""
+    def _txt(x: Any) -> str:  # <- widen type
+        if x is None:
+            return ""
+        try:
+            return x.get_text(" ", strip=True) if hasattr(x, "get_text") else str(x).strip()
+        except Exception:
+            return str(x).strip()
 
 
 def _txt_or_none(x: Any) -> Optional[str]:
@@ -96,7 +90,7 @@ def _txt_or_none(x: Any) -> Optional[str]:
 
 def _href(a: Any) -> str:
     """Return anchor href safely for Pylance/static typing."""
-    if isinstance(a, BsTag) and a.has_attr("href"):
+    if isinstance(a, Tag) and a.has_attr("href"):
         v = a.get("href")  # returns str | list[str] | None at runtime
         return v if isinstance(v, str) else ""
     return ""
@@ -113,10 +107,10 @@ def _safe_select_one(node: Any, selector: str) -> Any:
         return node.select_one(selector)
     return None
 
-def _safe_find(node: Any, name=None, **kwargs) -> Optional[BsTag]:
-    if isinstance(node, BsTag):
+def _safe_find(node: Any, name=None, **kwargs) -> Optional[Tag]:
+    if isinstance(node, Tag):
         el = node.find(name, **kwargs)
-        return el if isinstance(el, BsTag) else None
+        return el if isinstance(el, Tag) else None
     return None
 
 # Back-compat (optional)
@@ -124,19 +118,19 @@ safe_find_all = _safe_find_all
 safe_find = _safe_find
 
 
-def _first_tag(parent: Any, name: str, **kwargs: Any) -> Optional[BsTag]:
+def _first_tag(parent: Any, name: str, **kwargs: Any) -> Optional[Tag]:
     """Return first child Tag (never a PageElement placeholder)."""
-    if not isinstance(parent, BsTag):
+    if not isinstance(parent, Tag):
         return None
     found = parent.find(name, **kwargs)
-    return found if isinstance(found, BsTag) else None
+    return found if isinstance(found, Tag) else None
 
-def _first_a_by_text(parent: Any, needle: str) -> Optional[BsTag]:
+def _first_a_by_text(parent: Any, needle: str) -> Optional[Tag]:
     """First <a> whose text contains needle (case-insensitive)."""
-    if not isinstance(parent, BsTag):
+    if not isinstance(parent, Tag):
         return None
     needle_l = needle.lower()
-    # cast to help Pylance understand items are BsTag, not PageElement
+    # cast to help Pylance understand items are Tag, not PageElement
     for a_tag in cast(List[Tag], parent.find_all("a")):
         if _txt(a_tag).lower().find(needle_l) != -1:
             return a_tag
@@ -144,7 +138,7 @@ def _first_a_by_text(parent: Any, needle: str) -> Optional[BsTag]:
 
 def _attr(tag: Any, name: str) -> Optional[str]:
     """Safe attribute access that returns a cleaned string or None."""
-    if isinstance(tag, BsTag):
+    if isinstance(tag, Tag):
         val = tag.get(name)  # bs4-safe
         if val is None:
             return None
@@ -214,7 +208,7 @@ def parse_roadmap_html(path: str) -> List[Item]:
         # Roadmap ID – look for an <a> or a text like "ID: MC123456 / RM123456"
         rid = ""
         # try anchor with "roadmap" or "mc" in href
-        for a in cast(List[BsTag], row.find_all("a")):
+        for a in cast(List[Tag], row.find_all("a")):
             href = _attr(a, "href")
             if href and ("roadmap" in href.lower() or "messagecenter" in href.lower() or "mc" in href.lower()):
                 # often the anchor text is the ID too
@@ -230,8 +224,8 @@ def parse_roadmap_html(path: str) -> List[Item]:
 
         # URL – prefer first anchor that looks like roadmap/message center
         url = ""
-        a_pref: Optional[BsTag] = None
-        for a in cast(List[BsTag], row.find_all("a")):
+        a_pref: Optional[Tag] = None
+        for a in cast(List[Tag], row.find_all("a")):
             href = _attr(a, "href")
             if href and ("microsoft.com" in href.lower() or "roadmap" in href.lower() or "messagecenter" in href.lower()):
                 a_pref = a
@@ -287,7 +281,7 @@ def parse_roadmap_html(path: str) -> List[Item]:
 
         # If there are csv-like meta fields
         meta = row.select_one(".meta, .details, .properties")
-        if isinstance(meta, BsTag):
+        if isinstance(meta, Tag):
             products = products or _split_csv(_txt_or_none(meta.find(attrs={"data-key": "products"}) or "") or "")
             platforms = platforms or _split_csv(_txt_or_none(meta.find(attrs={"data-key": "platforms"}) or "") or "")
             audience = audience or _split_csv(_txt_or_none(meta.find(attrs={"data-key": "audience"}) or "") or "")
@@ -620,7 +614,7 @@ def parse_inputs(inputs: list[str], debug: bool = False):
 def _tx(x: Any) -> str:
     if x is None:
         return ""
-    if isinstance(x, (BsTag, NavigableString)):
+    if isinstance(x, (Tag, NavigableString)):
         return x.get_text(strip=True)
     return str(x).strip()
 
@@ -640,7 +634,7 @@ def _csv_list(s: str) -> List[str]:
             out.append(p)
     return out
 
-def _first_roadmap_link(container: BsTag) -> str:
+def _first_roadmap_link(container: Tag) -> str:
     # Prefer official roadmap links if present
     for a in container.find_all("a", href=True):
         href = _href(a)
@@ -676,86 +670,92 @@ def _normalize_label(s: str) -> str:
 
 # --- table-style parser -------------------------------------------------------
 
-def _parse_mc_table(table: BsTag) -> List[Item]:
+
+from bs4 import Tag
+from bs4.element import PageElement
+from typing import List, Optional, cast
+
+def _parse_mc_table(table: Tag) -> List[Item]:
     items: List[Item] = []
     headers: List[str] = []
-    # collect headers
-    thead = table.find("thead")
-    if isinstance(thead, BsTag):
-        ths = thead.find_all("th")
-        if ths:
-            headers = [_normalize_label(_tx(th)) for th in ths]
-    if not headers:
-        # try first row as header
-        first_tr = table.find("tr")
-        if isinstance(first_tr, BsTag):
-            ths = first_tr.find_all(["th", "td"])
-            headers = [_normalize_label(_tx(th)) for th in ths]
 
+    thead = table.find("thead")
+    if isinstance(thead, Tag):
+        ths = cast(Tag, thead).find_all("th")
+        if ths:
+            headers = [_normalize_label(_txt(th)) for th in ths]
+    if not headers:
+        first_tr = table.find("tr")
+        if isinstance(first_tr, Tag):
+            ths = cast(Tag, first_tr).find_all(["th", "td"])
+            headers = [_normalize_label(_txt(th)) for th in ths]
     if not headers:
         return items
 
-    # map a few common columns
-    # we don't require all; we pick what we can find
-    def col_index(name_options: List[str]) -> Optional[int]:
+    def col_index(opts: List[str]) -> Optional[int]:
         for i, h in enumerate(headers):
-            for opt in name_options:
+            for opt in opts:
                 if opt in h:
                     return i
         return None
 
-    idx_title     = col_index(["title", "subject", "feature"])
-    idx_summary   = col_index(["summary", "description", "details"])
-    idx_id        = col_index(["roadmap id", "id"])
-    idx_status    = col_index(["status", "phase"])
-    idx_products  = col_index(["product", "products"])
+    idx_title = col_index(["title", "subject", "feature"])
+    idx_summary = col_index(["summary", "description", "details"])
+    idx_id = col_index(["roadmap id", "id"])
+    idx_status = col_index(["status", "phase"])
+    idx_products = col_index(["product", "products"])
     idx_platforms = col_index(["platform", "platforms"])
-    idx_audience  = col_index(["audience"])
-    idx_date      = col_index(["date", "month", "published", "created", "modified"])
+    idx_audience = col_index(["audience"])
+    idx_date = col_index(["date", "month", "published", "created", "modified"])
+    idx_link = col_index(["link", "url"])
 
-    # iterate rows
     for tr in _safe_find_all(table, "tr"):
         tds = _safe_find_all(tr, "td")
         if not tds:
             continue
 
         def cell(i: Optional[int]) -> str:
-            if i is None or i < 0 or i >= len(tds):
-                return ""
-            return _txt(tds[i])  # <- not _tx, and make sure _txt(x: Any) exists
+            return _txt(cast(Tag, tds[i])) if (i is not None and 0 <= i < len(tds)) else ""
 
-            # ---- example extraction (adjust column indexes to your header map) ----
-            title     = cell(0)
-            rid       = cell(1)
-            desc      = cell(2)
-            status    = cell(3)
-            audience  = cell(4)
-            month_str = cell(5)
+        title = cell(idx_title)
+        rid = cell(idx_id)
+        desc = cell(idx_summary)
+        status = cell(idx_status)
+        products = _csv_list(cell(idx_products))
+        platforms = _csv_list(cell(idx_platforms))
+        audience = _csv_list(cell(idx_audience))
+        month_str = cell(idx_date)
 
-            # prefer a link in an explicit column; else first <a> in the row
-            link_host: Any = tds[6] if 6 < len(tds) else tr
-            a = safe_find(link_host, "a")
-            url = (a.get("href") if a and isinstance(a.get("href"), str) else "") if a else ""
+        # URL: prefer an explicit link col, else the first anchor in the row/summary cell
+        link_host = (
+            tds[idx_link] if (idx_link is not None and 0 <= idx_link < len(tds))
+            else (tds[idx_summary] if (idx_summary is not None and 0 <= idx_summary < len(tds)) else tr)
+        )
+        a = _safe_find(link_host, "a")
+        url = _attr(a, "href") or ""
 
-            # build your Item here with whatever columns you actually have:
-            # items.append(Item(
-            #     title=title or "(untitled)",
-            #     summary=desc,
-            #     roadmap_id=rid,
-            #     url=url,
-            #     month=month_str,
-            #     products=[],         # or split a product column if you have one
-            #     platforms=[],
-            #     status=status,
-            #     audience=audience,
-            # 
-        #)
-    #)
+        items.append(_safe_item(
+            title=title or "(untitled)",
+            summary=desc,
+            roadmap_id=rid,
+            url=url,
+            month=month_str,
+            products=products,
+            platforms=platforms,
+            status=status,
+            audience=audience,
+        ))
+
     return items
+
+def _txt(x: PageElement | None) -> str:
+    if x is None:
+        return ""
+    return x.get_text(strip=True) or ""
 
 # --- card/list-style parser ---------------------------------------------------
 
-def _parse_mc_cards(root: BsTag) -> List[Item]:
+def _parse_mc_cards(root: Tag) -> List[Item]:
     items: List[Item] = []
     # Example: fall back to tables if no card containers found
     for tbl in safe_find_all(root, "table"):
@@ -764,8 +764,14 @@ def _parse_mc_cards(root: BsTag) -> List[Item]:
             tds = safe_find_all(tr, "td")
             if not tds:
                 continue
+            
+
+            from bs4 import Tag
+            from typing import Optional, cast
             def cell(i: Optional[int], default: str = "") -> str:
-                return _txt(tds[i]) if (i is not None and 0 <= i < len(tds)) else default
+                return _txt(cast(Tag, tds[i])) if (i is not None and 0 <= i < len(tds)) else default
+
+
             title = cell(0); rid = cell(1); desc = cell(2); status = cell(3); audience = cell(4); month_str = cell(5)
             a = safe_find(tr, "a"); url = a.get("href") if a and isinstance(a.get("href"), str) else ""
             items.append(_safe_item(
@@ -806,15 +812,12 @@ def parse_message_center_html(html_path: str, month: str | None = None) -> list[
     from pathlib import Path
 
     # ---------- small helpers ----------
-    def _txt(x: BsTag | NavigableString | None) -> str:
+    def _txt(x: PageElement | None) -> str:
         if x is None:
             return ""
-        try:
-            return x.get_text(" ", strip=True)
-        except Exception:
-            return str(x).strip()
+        return x.get_text(strip=True) or ""
 
-    def _first(sel: BsTag, css: str) -> BsTag | None:
+    def _first(sel: Tag, css: str) -> Tag | None:
         # minimal CSS-ish: only tag names and [attr] and .class
         try:
             found = sel.select_one(css)  # bs4 supports select_one when soup is built with lxml
@@ -822,21 +825,20 @@ def parse_message_center_html(html_path: str, month: str | None = None) -> list[
         except Exception:
             return None
 
-    def _find_url(card: BsTag) -> str:
-        # any anchor with href that looks like a roadmap feature link
-        for a in card.find_all("a", href=True):
-            href = a.get("href") if hasattr(a, "get") else None
-            if isinstance(href, str) and re.search(r"(featureid=|\broadmap\b|\bmicrosoft-365-roadmap\b)", href, re.I):
+
+    def _find_url(card: Tag) -> str:
+        for a in safe_find_all(card, "a", href=True):
+            href = _attr(a, "href") or ""
+            if re.search(r"(featureid=|\broadmap\b|\bmicrosoft-365-roadmap\b)", href, re.I):
                 return href
-            # fallback: first anchor
-            a0 = card.find("a", href=True)
-            href = a0.get("href") if hasattr(a0, "get") else None # type: ignore[index]
-        return href if isinstance(href, str) else ""
-    # ---------- main logic ----
+        a0 = safe_find(card, "a", href=True)
+        return _attr(a0, "href") or "" if a0 else ""
+
+        # ---------- main logic ----
 
 
 
-    def _find_title(card: BsTag) -> str:
+    def _find_title(card: Tag) -> str:
         # headings or role=heading
         for sel in ("h1, h2, h3, h4", "[role=heading]"):
             h = _first(card, sel)
@@ -848,14 +850,16 @@ def parse_message_center_html(html_path: str, month: str | None = None) -> list[
         b = _first(card, "strong") or _first(card, ".ms-Text")
         return _txt(b)
 
-    def _longest_para(card: BsTag) -> str:
+    def _longest_para(card: Tag) -> str:
         paras = [p for p in card.find_all(["p", "div", "span"]) if _txt(p)]
         if not paras:
             return _txt(card)
         paras.sort(key=lambda p: len(_txt(p)), reverse=True)
         return _txt(paras[0])
 
-    def _find_rid(card: BsTag) -> str:
+
+
+    def _find_rid(card: Tag) -> str:
         # Look for numeric ID in common patterns
         text = _txt(card)
         m = re.search(r"\b(?:Feature\s*ID|Roadmap\s*ID|ID)\s*[:#]?\s*([0-9]{3,8})\b", text, re.I)
@@ -969,14 +973,14 @@ def parse_message_center_html(html_path: str, month: str | None = None) -> list[
     soup = BeautifulSoup(html, "lxml")
 
     # find cards (what your probe showed you have)
-    def _is_card(el: BsTag) -> bool:
+    def _is_card(el: Tag) -> bool:
         cls =  el.get("class") if hasattr(el, "get") else None
         if not cls:
             return False
         joined = " ".join(cls)
         return ("card" in joined) or joined.startswith("ms-") or "ms-" in joined
 
-    cards = [c for c in soup.find_all(True) if isinstance(c, BsTag) and _is_card(c)]
+    cards = [c for c in soup.find_all(True) if isinstance(c, Tag) and _is_card(c)]
 
     items: list[Item] = []
 
