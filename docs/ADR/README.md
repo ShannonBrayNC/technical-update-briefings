@@ -1,14 +1,25 @@
-# Architecture Decision Records (ADRs)
+# Architecture Decision Records
 
-This folder tracks design decisions for the Briefings project.
+This directory contains ADRs. Newest numbers are most recent.
 
-## Index
 - [ADR 0001: Python 3.12 Runtime & Pinned Dependencies](0001-python-runtime-and-deps.md)
 - [ADR 0002: Title Fit & Overflow Policy](0002-title-fit-policy.md)
 - [ADR 0003: Slide Geometry & Right Rail](0003-slide-rail-geometry.md)
-- [0004-striing-handling](0004-striing-handling.md)
-- [0005-tab-api-base-routing](0005-tab-api-base-routing.md)
-- [0006-bot-auth-and-proactive-messaging](0006-bot-auth-and-proactive-messaging.md)
-- [0007-cors-and-proxy-strategy](0007-cors-and-proxy-strategy.md)
-- [0008-hosting-and-stable-public-endpoint](0008-hosting-and-stable-public-endpoint.md)
-- [0009-ci-guardrails-and-style-checks](0009-ci-guardrails-and-style-checks.md)
+- [Architecture Decision Records”](0004-striing-handling.md)
+- [Status: Accepted](0005-tab-api-base-routing.md)
+- [Status: Accepted](0006-bot-auth-and-proactive-messaging.md)
+- [Status: Accepted](0007-cors-and-proxy-strategy.md)
+- [Status: Accepted](0008-hosting-and-stable-public-endpoint.md)
+- [Status: Accepted](0009-ci-guardrails-and-style-checks.md)
+- [0010 - Conversation reference persistence (beyond in-memory)](0010-conversation-reference-persistence.md)
+- [0011 - Secrets and certificate management (Key Vault plus App Settings)](0011-secrets-and-cert-management.md)
+- [ADR 0012 : Defensive HTML Parsing & BS4 Typing](0012-Defensive-HTML-Parsing-&-BS4-Typing.ToLower().md)
+- [ADR 0012 : Defensive HTML Parsing & BeautifulSoup Typing](0012-defensive-html-parsing-and-bs4-typing.md)
+- [ADR 0013 : Path Resolution Strategy for Inputs/Assets](0013-path-resolution-for-inputs-and-assets.md)
+- [ADR 0014 : Remove PresentationLike Protocol; Use Concrete python-pptx Types](0014-concrete-pptx-types.md)
+- [ADR 0015 : Stable Cover/Agenda Function Signatures](0015-stable-cover-agenda-signatures.md)
+- [ADR 0016 : Eliminate CLI Flags for Static Icons](0016-remove-cli-flags-for-static-icons.md)
+- [ADR 0017 : ESLint v9 Flat Config Migration](0017-eslint-v9-flat-config.md)
+- [ADR 0018 : Graceful Handling When No Items Are Parsed](0018-graceful-empty-data-slides.md)
+- [Architecture Decision Records](README.md)
+- [ADR 000X: <Decision title>](template.md)
