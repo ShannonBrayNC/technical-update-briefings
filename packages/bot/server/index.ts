@@ -1,31 +1,61 @@
-import 'dotenv/config';
-import express from 'express';
-import bodyParser from 'body-parser';
-import { CloudAdapter, ConfigurationBotFrameworkAuthentication, ConfigurationServiceClientCredentialFactory } from 'botbuilder';
-import { BriefingBot, ConversationRegistry } from './bot';
-import { Dispatcher } from './worker';
+import express from "express";
+import bodyParser from "body-parser";
+import "dotenv/config";
+import { ActivityTypes, CardFactory, TurnContext } from "botbuilder";
+import { adapter } from "./adapter";
+import { BriefingBot } from "./bot";
+import { getRef } from "./store";
+
 const app = express();
-app.use(bodyParser.json({ limit: '1mb' }));
-const credentialsFactory = new ConfigurationServiceClientCredentialFactory({
-  MicrosoftAppType: process.env.MicrosoftAppType,
-  MicrosoftAppId: process.env.MicrosoftAppId,
-  MicrosoftAppTenantId: process.env.MicrosoftAppTenantId,
-  CertificateThumbprint: process.env.CertificateThumbprint,
-  CertificatePrivateKey: process.env.CertificatePrivateKey,
+app.use(bodyParser.json());
+
+const bot = new BriefingBot();
+
+// 1) Bot Framework endpoint for Teams
+app.post("/api/messages", (req, res) => {
+  adapter.process(req, res, (context) => bot.run(context));
 });
-const botFrameworkAuth = new ConfigurationBotFrameworkAuthentication({}, credentialsFactory);
-const adapter = new CloudAdapter(botFrameworkAuth);
-const registry = new ConversationRegistry();
-const bot = new BriefingBot(undefined as any, registry);
-const dispatcher = new Dispatcher(adapter, registry);
-app.post('/api/messages', async (req, res) => { await adapter.process(req, res, (context) => bot.run(context)); });
-app.post('/api/ask', async (req, res) => {
-  const { meetingId, userAadObjectId, topicId, card, idempotencyKey } = req.body || {};
-  const headerKey = (req.header('Idempotency-Key') as string) || idempotencyKey;
-  if (!topicId || !card) return res.status(400).json({ error: 'topicId and card required' });
-  await dispatcher.enqueue({ meetingId, userAadObjectId, topicId, card, idempotencyKey: headerKey });
-  res.status(202).json({ ok: true, queued: true });
+
+// 2) Health
+app.get("/healthz", (_req, res) => res.status(200).send("ok"));
+
+// 3) Proactive send from the tab ("Ask more")
+app.post("/api/ask", async (req, res) => {
+  const { topicId, card, userAadObjectId } = req.body ?? {};
+  console.log("[api/ask]", { topicId, hasCard: !!card, userAadObjectId });
+
+  if (!card || !userAadObjectId) {
+    // We can also accept meetingId later; for now require user id for 1:1
+    return res.status(400).json({ ok: false, error: "card and userAadObjectId required" });
+  }
+
+  const ref = getRef(String(userAadObjectId));
+  if (!ref) {
+    // The user hasn’t messaged the bot yet; we can’t proactively open a 1:1 reliably without a saved ref.
+    console.log("[api/ask] no conversation ref yet for user; ask them to send 'hi' to the bot once.");
+    return res.status(202).json({
+      ok: true,
+      queued: true,
+      message: "No conversation reference for this user yet. Ask the user to send a message to the bot once."
+    });
+  }
+
+  try {
+    await adapter.continueConversationAsync(process.env.MicrosoftAppId!, ref, async (turn) => {
+      // Attach Adaptive Card
+      const attachment = CardFactory.adaptiveCard(card);
+      await turn.sendActivity({ type: ActivityTypes.Message, attachments: [attachment] });
+    });
+    return res.status(202).json({ ok: true, queued: false });
+  } catch (err) {
+    console.error("[api/ask] proactive send failed:", err);
+    return res.status(500).json({ ok: false, error: "send_failed" });
+  }
 });
-app.get('/health', (_req, res) => res.json({ ok: true }));
-const port = process.env.PORT || 3978;
-app.listen(port, async () => { await dispatcher.start(); console.log([server] listening on :); });
+
+const PORT = Number(process.env.PORT || 3978);
+app.listen(PORT, () => {
+  console.log(`server listening on http://localhost:${PORT}`);
+  console.log("→ POST /api/messages (Teams)");
+  console.log("→ POST /api/ask       (proactive 1:1 send)");
+});

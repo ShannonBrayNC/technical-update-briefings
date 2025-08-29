@@ -1,675 +1,543 @@
+# -*- coding: utf-8 -*-
+"""
+Generate a PowerPoint deck from Roadmap/Message Center HTML exports.
+
+Stable build:
+- Avoids fragile type hints around python-pptx; uses Any where needed
+- One definition per helper (_clean, _txt, etc.)
+- Slide geometry taken from `prs.slide_width/slide_height` (never slide.part.*)
+- add_item_slide() has a single stable signature, with rail geometry args
+- Parsing is defensive; missing fields become "", [] rather than crashing
+"""
+
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import os
-import re
-import sys
-import time
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag, NavigableString
 
-from pptx import Presentation
-from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
+# python-pptx
+import pptx
 from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from pptx.enum.dml import MSO_THEME_COLOR
 from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
 
-
-# ----------------------------
-# Constants / theme
-# ----------------------------
-EMU_PER_INCH = 914400
-
-GOLD = RGBColor(212, 175, 55)
+# -------------------------
+# Colors / style constants
+# -------------------------
+GOLD = RGBColor(214, 168, 76)
+DARK_PURPLE = RGBColor(51, 18, 54)
+GRAY = RGBColor(90, 90, 90)
 WHITE = RGBColor(255, 255, 255)
-BLACK = RGBColor(0, 0, 0)
-DARK_PURPLE = RGBColor(40, 17, 63)      # rail
-MID_PURPLE = RGBColor(70, 35, 100)
-LIGHT_PURPLE = RGBColor(95, 60, 135)
 
-DEFAULT_RAIL_WIDTH_IN = 3.5
-PAGE_MARGIN_IN = 0.6
-
-
-# ----------------------------
-# Utils
-# ----------------------------
-def emu_to_inches(emu_val: int) -> float:
-    return float(emu_val) / EMU_PER_INCH
-
-
-def _to_text(val: Any) -> str:
-    """Turn bs4 values (str | list[str] | Tag | NavigableString | None) into text."""
-    if val is None:
-        return ""
-    if isinstance(val, (NavigableString,)):
-        return str(val)
-    if isinstance(val, Tag):
-        return val.get_text(" ", strip=True)
-    if isinstance(val, (list, tuple, set)):
-        return ", ".join(_to_text(v) for v in val if v is not None)
-    return str(val)
-
-
-def _clean(s: Any) -> str:
-    return re.sub(r"\s+", " ", _to_text(s)).strip()
-
-
-def smart_split_product_title(title: str) -> Tuple[str, str]:
-    """
-    If title is like 'Product: Feature name', return ('Product', 'Feature name').
-    Otherwise return ('', title).
-    """
-    if not title:
-        return "", ""
-    m = re.match(r"^\s*([^:]{2,50})\s*:\s*(.+)$", title)
-    if m:
-        prod = m.group(1).strip()
-        rest = m.group(2).strip()
-        return prod, rest
-    return "", title.strip()
-
-
-def pick_status_icon_key(status_text: str) -> str:
-    """
-    Choose 'rocket' for GA/Launched/Rolling out; 'magnifier' for Preview/In development/Planned.
-    Default to 'magnifier' when uncertain.
-    """
-    s = (status_text or "").lower()
-    if any(k in s for k in ["launched", "rolling out", "rolled out", "general availability", "ga"]):
-        return "rocket"
-    if any(k in s for k in ["preview", "in development", "planned", "beta"]):
-        return "magnifier"
-    return "magnifier"
-
-
-def path_if_exists(p: Optional[str]) -> Optional[str]:
-    if p and os.path.exists(p):
-        return p
-    return None
-
-
-def add_picture_safe(slide, image_path: Optional[str], left_in: float, top_in: float,
-                     width_in: Optional[float] = None, height_in: Optional[float] = None):
-    """Add picture if file is present. width_in/height_in are optional (Inches)."""
-    if not image_path or not os.path.exists(image_path):
-        return None
-    left = Inches(left_in)
-    top = Inches(top_in)
-    if width_in is None and height_in is None:
-        return slide.shapes.add_picture(image_path, left, top)
-    if width_in is not None and height_in is None:
-        return slide.shapes.add_picture(image_path, left, top, width=Inches(width_in))
-    if width_in is None and height_in is not None:
-        return slide.shapes.add_picture(image_path, left, top, height=Inches(height_in))
-    return slide.shapes.add_picture(image_path, left, top, width=Inches(width_in), height=Inches(height_in))
-
-
-def add_title_box(
-    slide,
-    text: str,
-    *,
-    left_in: float,
-    top_in: float,
-    width_in: float,
-    height_in: float,
-    font_size_pt: int = 60,
-    bold: bool = True,
-    color: RGBColor = GOLD,
-    align=PP_ALIGN.LEFT
-):
-    """Title that wraps & shrinks to fit."""
-    box = slide.shapes.add_textbox(
-        Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
-    )
-    tf = box.text_frame
-    tf.clear()
-    tf.word_wrap = True
-    tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
-    tf.margin_left = Inches(0.05)
-    tf.margin_right = Inches(0.05)
-    tf.margin_top = Inches(0.02)
-    tf.margin_bottom = Inches(0.02)
-    p = tf.paragraphs[0]
-    p.alignment = align
-    r = p.add_run()
-    r.text = text or ""
-    f = r.font
-    f.size = Pt(font_size_pt)
-    f.bold = bold
-    f.color.rgb = color
-    return box
-
-
-def add_text_box(
-    slide,
-    text: str,
-    *,
-    left_in: float,
-    top_in: float,
-    width_in: float,
-    height_in: float,
-    size_pt: int = 18,
-    bold: bool = False,
-    color: RGBColor = WHITE,
-    align=PP_ALIGN.LEFT
-):
-    box = slide.shapes.add_textbox(
-        Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
-    )
-    tf = box.text_frame
-    tf.clear()
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    p.alignment = align
-    r = p.add_run()
-    r.text = text or ""
-    f = r.font
-    f.size = Pt(size_pt)
-    f.bold = bold
-    f.color.rgb = color
-    return box
-
-
-def add_full_slide_picture(slide, prs, image_path: Optional[str]):
-    """Stretch a background image to full slide; ignore if missing."""
-    if not image_path or not os.path.exists(image_path):
-        return
-    sw = emu_to_inches(prs.slide_width)
-    sh = emu_to_inches(prs.slide_height)
-    add_picture_safe(slide, image_path, left_in=0.0, top_in=0.0, width_in=sw, height_in=sh)
-
-
-def draw_side_rail(slide, prs, rail_left_in: float, rail_width_in: float, color: RGBColor = DARK_PURPLE):
-    """Right-side vertical rail rectangle, sized using the Presentation dimensions."""
-    slide_h_in = emu_to_inches(prs.slide_height)
-    shape = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE,
-        Inches(rail_left_in),
-        Inches(0.0),
-        Inches(rail_width_in),
-        Inches(slide_h_in)
-    )
-    fill = shape.fill
-    fill.solid()
-    fill.fore_color.rgb = color
-    shape.line.fill.background()
-    return shape
-
-
-def add_bubble(slide, text: str, left_in: float, top_in: float, width_in: float, height_in: float):
-    """Rounded rectangle bubble for product/technology."""
-    shape = slide.shapes.add_shape(
-        MSO_SHAPE.ROUNDED_RECTANGLE, Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
-    )
-    fill = shape.fill
-    fill.solid()
-    fill.fore_color.rgb = MID_PURPLE
-    shape.line.fill.background()
-    tf = shape.text_frame
-    tf.clear()
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    p.alignment = PP_ALIGN.LEFT
-    r = p.add_run()
-    r.text = text
-    f = r.font
-    f.size = Pt(16)
-    f.bold = True
-    f.color.rgb = WHITE
-    return shape
-
-
-def add_notes(slide, text: str):
-    if not text:
-        return
-    notes = slide.notes_slide.notes_text_frame
-    if notes.paragraphs and notes.paragraphs[0].text:
-        notes.text += "\n\n" + text
-    else:
-        notes.text = text
-
-
-def _safe_save(prs, output_path: str, tries: int = 4, delay_sec: float = 0.6) -> str:
-    base, ext = os.path.splitext(output_path)
-    for i in range(tries):
-        candidate = output_path if i == 0 else f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{i}{ext}"
-        try:
-            prs.save(candidate)
-            return candidate
-        except PermissionError:
-            time.sleep(delay_sec)
-            continue
-    prs.save(output_path)
-    return output_path
-
-
-# ----------------------------
+# -------------------------
 # Data model
-# ----------------------------
+# -------------------------
 @dataclass
 class Item:
     title: str
-    summary: str
-    product: str
-    month: str
-    status: str
+    description: str
     roadmap_id: str
     url: str
-    audience: str  # "Admin", "End user", etc.
-    date_str: str
-    notes: str
+    month: str
+    products: List[str]
+    platforms: List[str]
+    phases: List[str]        # e.g., ["Rolling out", "In development"]
+    audience: List[str]
+    created: str = ""
+    modified: str = ""
+    ga: str = ""             # GA date if present
 
+# -------------------------
+# Small safe helpers (single definitions)
+# -------------------------
+def _clean(s: Any) -> str:
+    """Coerce bs4 attribute or text into a plain string."""
+    if s is None:
+        return ""
+    # Some bs4 attributes are lists (AttributeValueList); join them.
+    if isinstance(s, (list, tuple)):
+        return " ".join(_clean(x) for x in s if x is not None).strip()
+    return str(s).strip()
 
-# ----------------------------
-# HTML parsing
-# ----------------------------
-STATUS_WORDS = [
-    "Launched", "Rolling out", "General Availability", "GA",
-    "Preview", "Public Preview", "Private Preview",
-    "In development", "Planned", "Beta"
-]
+def _txt(x: Any) -> str:
+    """Inner text for Tag/NavigableString; else empty."""
+    if isinstance(x, (Tag, NavigableString)):
+        return x.get_text(strip=True)
+    return ""
 
-AUDIENCE_WORDS = ["Admin", "Administrator", "IT Admin", "End user", "User", "Developer"]
+def _txt_or_none(x: Any) -> Optional[str]:
+    t = _txt(x)
+    return t if t else None
 
+def _first_tag(parent: Any, name: str, **kwargs: Any) -> Optional[Tag]:
+    """Return first child Tag (never a PageElement placeholder)."""
+    if not isinstance(parent, Tag):
+        return None
+    found = parent.find(name, **kwargs)
+    return found if isinstance(found, Tag) else None
 
-def parse_html_items(paths: List[str]) -> List[Item]:
+def _first_a_by_text(parent: Any, needle: str) -> Optional[Tag]:
+    """First <a> whose text contains needle (case-insensitive)."""
+    if not isinstance(parent, Tag):
+        return None
+    needle_l = needle.lower()
+    # cast to help Pylance understand items are Tag, not PageElement
+    for a_tag in cast(List[Tag], parent.find_all("a")):
+        if _txt(a_tag).lower().find(needle_l) != -1:
+            return a_tag
+    return None
+
+def _attr(tag: Any, name: str) -> Optional[str]:
+    """Safe attribute access that returns a cleaned string or None."""
+    if isinstance(tag, Tag):
+        val = tag.get(name)  # bs4-safe
+        if val is None:
+            return None
+        return _clean(val)
+    return None
+
+def _split_csv(text: str) -> List[str]:
+    parts = [p.strip() for p in text.split(",")] if text else []
+    return [p for p in parts if p]
+
+# -------------------------
+# Parsing (defensive)
+# -------------------------
+def parse_roadmap_html(path: str) -> List[Item]:
+    """
+    Parse the HTML you exported for the Roadmap (or Message Center styled).
+    Tries a few common structures; never throws on missing bits.
+    """
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        soup = BeautifulSoup(f.read(), "lxml")
+
+    rows: List[Tag] = []
+    # Try table rows
+    rows.extend(soup.select("table tr"))
+    # Try card-like blocks
+    rows.extend(soup.select(".item, .message, .mc-post, .roadmap-card"))
+
     items: List[Item] = []
-    for p in paths:
-        if not os.path.exists(p):
+
+    for row in rows:
+        # Title – try common selectors
+        title_tag = (
+            _first_tag(row, "h1")
+            or _first_tag(row, "h2")
+            or _first_tag(row, "h3")
+            or _first_tag(row, "a")
+        )
+        title = _txt(title_tag)
+        if not title:
+            # skip table header rows etc.
             continue
-        with open(p, "r", encoding="utf-8", errors="ignore") as f:
-            html = f.read()
-        soup = BeautifulSoup(html, "lxml")
 
-        # Try common containers for cards
-        candidates: List[Tag] = []
-        candidates.extend(soup.select(".card, .roadmap-card, li.roadmap-item, article"))
-        if not candidates:
-            # fallback: any element that looks like an item with a title link
-            candidates.extend([a.parent for a in soup.select("h3 a, h4 a") if isinstance(a.parent, Tag)])
+        # Roadmap ID – look for an <a> or a text like "ID: MC123456 / RM123456"
+        rid = ""
+        # try anchor with "roadmap" or "mc" in href
+        for a in cast(List[Tag], row.find_all("a")):
+            href = _attr(a, "href")
+            if href and ("roadmap" in href.lower() or "messagecenter" in href.lower() or "mc" in href.lower()):
+                # often the anchor text is the ID too
+                rid = _txt(a) or rid
+                break
+        if not rid:
+            # last resort: any text like ID: XXX
+            text = row.get_text(" ", strip=True)
+            for token in text.split():
+                if token.upper().startswith(("RM", "MC")) and any(ch.isdigit() for ch in token):
+                    rid = token
+                    break
 
-        for card in candidates:
-            try:
-                # Title + URL
-                a = card.select_one("h3 a, h4 a, a.title, .title a")
-                title = _clean(a.get_text() if a else _clean(card.get("data-title")))
-                href_val: Any = (a.get("href") if (a and a.has_attr("href")) else "")
-                if isinstance(href_val, (list, tuple)):
-                    href_val = href_val[0] if href_val else ""
-                url = _clean(href_val)
+        # URL – prefer first anchor that looks like roadmap/message center
+        url = ""
+        a_pref: Optional[Tag] = None
+        for a in cast(List[Tag], row.find_all("a")):
+            href = _attr(a, "href")
+            if href and ("microsoft.com" in href.lower() or "roadmap" in href.lower() or "messagecenter" in href.lower()):
+                a_pref = a
+                break
+        if a_pref is not None:
+            url = _attr(a_pref, "href") or ""
 
-                # Summary / description
-                summary = ""
-                sCand = card.select_one(".summary, .description, p")
-                if sCand:
-                    summary = _clean(sCand.get_text())
+        # Description / summary
+        # Prefer paragraph-like content under row
+        desc_tag = (
+            _first_tag(row, "p")
+            or _first_tag(row, "div", class_="description")
+            or _first_tag(row, "div", class_="content")
+        )
+        description = _txt(desc_tag)
 
-                # Roadmap/Feature ID
-                text_all = _clean(card.get_text(" "))
-                rid = ""
-                m = re.search(r"(?:Feature\s*ID|Roadmap\s*ID)\s*[:#]?\s*(\d{4,7})", text_all, re.I)
-                if m:
-                    rid = m.group(1)
+        # Month – look for "Month:" or date-y text
+        month = ""
+        month_tag = _first_a_by_text(row, "Month:") or _first_tag(row, "span", class_="month")
+        if month_tag:
+            month = _txt(month_tag)
+        if not month:
+            # try any text that looks like "Aug 2025"
+            text = row.get_text(" ", strip=True)
+            for m in (
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+            ):
+                if f"{m} " in text:
+                    month = text[text.find(m):text.find(m)+8]
+                    break
 
-                # Month / date
-                month = ""
-                m2 = re.search(r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
-                               r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|"
-                               r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}", text_all, re.I)
-                if m2:
-                    month = m2.group(0).title()
+        # Product / Platform / Audience / Phase chips
+        products: List[str] = []
+        platforms: List[str] = []
+        phases: List[str] = []
+        audience: List[str] = []
 
-                # Status
-                status = ""
-                for w in STATUS_WORDS:
-                    if re.search(rf"\b{re.escape(w)}\b", text_all, re.I):
-                        status = w
-                        break
-
-                # Audience
-                audience = ""
-                for w in AUDIENCE_WORDS:
-                    if re.search(rf"\b{re.escape(w)}\b", text_all, re.I):
-                        audience = "Admin" if "admin" in w.lower() else "End user"
-                        break
-
-                # Product (chips/badges) or from title "Product: Feature"
-                product = ""
-                chip = card.select_one(".product, .technology, .category, .badge")
-                if chip:
-                    product = _clean(chip.get_text())
-                prod_from_title, clean_title = smart_split_product_title(title)
-                if prod_from_title and not product:
-                    product = prod_from_title
-                    title = clean_title
-
-                # Notes (long body) for speaker notes
-                # Grab more verbose area if present
-                long = ""
-                longCand = card.select_one(".details, .notes, .content, .body")
-                if longCand:
-                    long = _clean(longCand.get_text())
-                else:
-                    # fallback: use full text minus the summary if present
-                    if summary and text_all:
-                        long = text_all
-
-                # Date (as text string) — often similar to month but keep both
-                date_str = ""
-                m3 = re.search(r"\b(?:Updated|Created|Published)\s*[:\-]?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", text_all, re.I)
-                if m3:
-                    date_str = m3.group(1)
-
-                items.append(Item(
-                    title=title or "(Untitled)",
-                    summary=summary or "",
-                    product=product or "",
-                    month=month or "",
-                    status=status or "",
-                    roadmap_id=rid or "",
-                    url=url or "",
-                    audience=audience or "",
-                    date_str=date_str or month or "",
-                    notes=long or ""
-                ))
-            except Exception:
-                # keep going if a single card is malformed
+        # Common chips containers
+        for chip in row.select(".chip, .tag, .badge, .pill, .label"):
+            label = _txt(chip)
+            labl = label.lower()
+            if not label:
                 continue
+            if any(w in labl for w in ("windows", "mac", "ios", "android", "web", "gcc", "dod", "gcc high")):
+                platforms.append(label)
+            elif any(w in labl for w in ("rolling out", "in development", "preview", "launched")):
+                phases.append(label)
+            elif any(w in labl for w in ("admin", "end user", "developer", "education", "enterprise")):
+                audience.append(label)
+            else:
+                products.append(label)
 
-    # Deduplicate by (title, roadmap_id) conservatively
-    dedup: Dict[Tuple[str, str], Item] = {}
-    for it in items:
-        key = (it.title.lower(), it.roadmap_id)
-        dedup[key] = it
-    return list(dedup.values())
+        # If there are csv-like meta fields
+        meta = row.select_one(".meta, .details, .properties")
+        if isinstance(meta, Tag):
+            products = products or _split_csv(_txt_or_none(meta.find(attrs={"data-key": "products"}) or "") or "")
+            platforms = platforms or _split_csv(_txt_or_none(meta.find(attrs={"data-key": "platforms"}) or "") or "")
+            audience = audience or _split_csv(_txt_or_none(meta.find(attrs={"data-key": "audience"}) or "") or "")
+
+        items.append(
+            Item(
+                title=title,
+                description=description,
+                roadmap_id=_clean(rid),
+                url=_clean(url),
+                month=_clean(month),
+                products=sorted(set([_clean(p) for p in products if p])),
+                platforms=sorted(set([_clean(p) for p in platforms if p])),
+                phases=sorted(set([_clean(p) for p in phases if p])),
+                audience=sorted(set([_clean(p) for p in audience if p])),
+            )
+        )
+
+    return items
+
+# -------------------------
+# PPT helpers
+# -------------------------
+def _add_textbox(
+    slide: Any,
+    left_in: float,
+    top_in: float,
+    width_in: float,
+    height_in: float,
+    text: str,
+    font_size: int = 18,
+    bold: bool = False,
+    color: Optional[RGBColor] = None,
+    align: PP_ALIGN = PP_ALIGN.LEFT,
+) -> Any:
+    tx = slide.shapes.add_textbox(Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in))
+    tf = tx.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = text or ""
+    font = run.font
+    font.size = Pt(font_size)
+    font.bold = bold
+    if color:
+        font.color.rgb = color
+    p.alignment = align
+    return tx
+
+def _add_picture_cover(slide: Any, prs: Any, image_path: Optional[str]) -> None:
+    if not image_path or not os.path.isfile(image_path):
+        return
+    # full-bleed
+    sw, sh = prs.slide_width, prs.slide_height
+    slide.shapes.add_picture(image_path, 0, 0, width=sw, height=sh)
+
+def draw_side_rail(slide: Any, prs: Any, left_in: float, width_in: float, color: RGBColor = DARK_PURPLE) -> None:
+    """Simple vertical rail rectangle."""
+    EMU_PER_IN = 914400
+    height_in = float(prs.slide_height) / EMU_PER_IN
+    rect = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(left_in),
+        Inches(0.0),
+        Inches(width_in),
+        Inches(height_in),
+    )
+    fill = rect.fill
+    fill.solid()
+    fill.fore_color.rgb = color
+    rect.line.fill.background()
 
 
-# ----------------------------
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    if not text:
+        return ""
+    return text if len(text) <= max_chars else text[: max_chars - 1].rstrip() + "…"
+
+# -------------------------
 # Slide builders
-# ----------------------------
-def add_bg(slide, prs, image_path: Optional[str]):
-    add_full_slide_picture(slide, prs, image_path)
+# -------------------------
+def add_cover_slide(
+    prs: Any,
+    month_str: str,
+    cover_title: str,
+    cover_dates: str,
+    bg_path: Optional[str] = None,
+    logo_path: Optional[str] = None,
+    logo2_path: Optional[str] = None,
+) -> Any:
+    slide_layout = prs.slide_layouts[6]  # blank
+    slide = prs.slides.add_slide(slide_layout)
 
+    # background
+    _add_picture_cover(slide, prs, bg_path)
 
-def add_cover_slide(prs, assets: dict, cover_title: Optional[str], cover_dates: Optional[str],
-                    logo1: Optional[str], logo2: Optional[str]):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
-    add_bg(slide, prs, assets.get("cover"))
+    # title
+    _add_textbox(slide, 1.2, 1.2, 9.0, 1.2, cover_title or "Roadmap & Updates", 42, True, GOLD)
+    # dates/month
+    _add_textbox(slide, 1.2, 2.1, 9.0, 0.7, month_str or cover_dates or "", 20, False, WHITE)
 
-    # Title
-    sw_in = emu_to_inches(prs.slide_width)
-    left = PAGE_MARGIN_IN
-    right = PAGE_MARGIN_IN
-    top = 1.2
-    height = 1.6
-    width = max(1.0, sw_in - left - right)
-    add_title_box(slide, cover_title or "Technical Update Briefing",
-                  left_in=left, top_in=top, width_in=width, height_in=height, font_size_pt=64, bold=True, color=GOLD)
+    # logos (optional)
+    if logo_path and os.path.isfile(logo_path):
+        slide.shapes.add_picture(logo_path, Inches(10.5), Inches(0.6), width=Inches(1.3))
+    if logo2_path and os.path.isfile(logo2_path):
+        slide.shapes.add_picture(logo2_path, Inches(10.5), Inches(2.1), width=Inches(1.3))
 
-    # Dates
-    add_text_box(slide, cover_dates or "", left_in=left, top_in=top + height + 0.2, width_in=width, height_in=0.6,
-                 size_pt=28, bold=False, color=WHITE)
+    return slide
 
-    # Logos bottom-left/right
-    add_picture_safe(slide, path_if_exists(logo1), left_in=0.4, top_in=6.6, height_in=0.6)
-    add_picture_safe(slide, path_if_exists(logo2), left_in=sw_in - 2.2, top_in=6.5, width_in=1.8)
-
-
-def add_agenda_slide(prs, assets: dict, agenda_lines: Optional[List[str]] = None):
+def add_separator_slide(prs: Any, title: str, bg_path: Optional[str] = None) -> Any:
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    add_bg(slide, prs, assets.get("agenda"))
-    # Title
-    sw_in = emu_to_inches(prs.slide_width)
-    add_title_box(slide, "Agenda", left_in=PAGE_MARGIN_IN, top_in=0.9,
-                  width_in=sw_in - 2 * PAGE_MARGIN_IN, height_in=1.2, font_size_pt=52, color=GOLD)
-    # Bullets
-    if not agenda_lines:
-        agenda_lines = ["Overview", "Key updates by product", "Timeline & rollout status", "Q&A"]
-    top = 2.4
-    for line in agenda_lines:
-        add_text_box(slide, f"• {line}", left_in=PAGE_MARGIN_IN, top_in=top,
-                     width_in=sw_in - 2 * PAGE_MARGIN_IN, height_in=0.5, size_pt=26, color=WHITE)
-        top += 0.6
+    _add_picture_cover(slide, prs, bg_path)
+    _add_textbox(slide, 1.5, 1.8, 9.0, 1.2, title or "", 36, True, WHITE)
+    return slide
 
-
-def add_separator_slide(prs, assets: dict, title: str):
+def add_item_slide(
+    prs: Any,
+    it: Item,
+    month_str: str,
+    rail_left_in: float,
+    rail_width_in: float,
+    assets: Dict[str, Optional[str]],
+) -> Any:
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    add_bg(slide, prs, assets.get("separator"))
-    sw_in = emu_to_inches(prs.slide_width)
-    add_title_box(slide, title, left_in=PAGE_MARGIN_IN, top_in=3.2,
-                  width_in=sw_in - 2 * PAGE_MARGIN_IN, height_in=1.5, font_size_pt=56, color=GOLD)
 
+    # Background brand if provided
+    brand_bg = assets.get("brand_bg") if assets else None
+    _add_picture_cover(slide, prs, brand_bg)
 
-def add_conclusion_slide(prs, assets: dict, links: List[Tuple[str, str]]):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    add_bg(slide, prs, assets.get("conclusion"))
-    sw_in = emu_to_inches(prs.slide_width)
-    add_title_box(slide, "Final Thoughts", left_in=PAGE_MARGIN_IN, top_in=0.9,
-                  width_in=sw_in - 2 * PAGE_MARGIN_IN, height_in=1.2, font_size_pt=52, color=GOLD)
-    top = 2.4
-    for text, url in links:
-        add_text_box(slide, f"{text}: {url}", left_in=PAGE_MARGIN_IN, top_in=top,
-                     width_in=sw_in - 2 * PAGE_MARGIN_IN, height_in=0.5, size_pt=22, color=WHITE)
-        top += 0.6
+    # Side rail
+    draw_side_rail(slide, prs, rail_left_in, rail_width_in, DARK_PURPLE)
 
+    # Geometry (content area to the right of the rail)
+    content_left = rail_left_in + rail_width_in + 0.3
+    content_width = 12.8 - content_left  # assuming 13.3" width slide; it's fine with small margin
+    content_top = 0.6
 
-def add_thankyou_slide(prs, assets: dict):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    add_bg(slide, prs, assets.get("thankyou"))
-    # nothing else required; background handles the design
+    # Bubble (product or first phase)
+    bubble = (it.products[0] if it.products else (it.phases[0] if it.phases else "")).upper()
+    _add_textbox(slide, content_left, content_top, content_width, 0.5, bubble, 14, True, GOLD)
 
+    # Title (gold)
+    _add_textbox(slide, content_left, content_top + 0.5, content_width, 0.9, it.title, 28, True, GOLD)
 
-def add_item_slide(prs, item: Item, month_str: Optional[str], assets: dict,
-                   rail_width_in: float = DEFAULT_RAIL_WIDTH_IN, brand_bg: Optional[str] = None):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    # Brand background first (overridable), else none
-    add_bg(slide, prs, brand_bg)
-
-    # Compute geometry
-    sw_in = emu_to_inches(prs.slide_width)
-    sh_in = emu_to_inches(prs.slide_height)
-
-    # Side rail on right
-    rail_left_in = max(0.0, sw_in - rail_width_in)
-    draw_side_rail(slide, prs, rail_left_in, rail_width_in, color=DARK_PURPLE)
-
-
-    # Product bubble (top-left)
-    bubble_w = max(1.8, min(3.8, (sw_in - rail_width_in) * 0.35))
-    add_bubble(slide, item.product or "", left_in=PAGE_MARGIN_IN, top_in=0.6, width_in=bubble_w, height_in=0.55)
-
-    # Title in gold (left area width excludes rail)
-    title_left = PAGE_MARGIN_IN
-    title_top = 1.4
-    title_width = max(3.0, sw_in - rail_width_in - PAGE_MARGIN_IN - PAGE_MARGIN_IN)
-    title_height = 1.5
-    add_title_box(
-        slide, item.title,
-        left_in=title_left, top_in=title_top, width_in=title_width, height_in=title_height,
-        font_size_pt=44, bold=True, color=GOLD, align=PP_ALIGN.LEFT
+    # Summary / description
+    _add_textbox(
+        slide,
+        content_left,
+        content_top + 1.2,
+        content_width,
+        2.4,
+        it.description,
+        16,
+        False,
+        WHITE,
     )
 
-    # Summary body (below title)
-    body_top = title_top + title_height + 0.2
-    body_height = max(1.0, sh_in - body_top - 1.3)
-    add_text_box(
-        slide, item.summary or "",
-        left_in=PAGE_MARGIN_IN, top_in=body_top,
-        width_in=title_width, height_in=body_height,
-        size_pt=22, color=WHITE
+    # Right rail content (ID, phases, platforms, audience, link)
+    rail_text_top = 0.6
+    right_pad = rail_left_in + 0.2
+    # Month in a colored chip look (just text styled)
+    _add_textbox(slide, 0.3, rail_text_top, rail_left_in - 0.5, 0.4, month_str, 14, True, WHITE, PP_ALIGN.CENTER)
+
+    rail_text_top += 0.6
+    _add_textbox(slide, 0.3, rail_text_top, rail_left_in - 0.5, 0.4, f"ID: {it.roadmap_id}", 14, False, WHITE)
+    rail_text_top += 0.45
+    _add_textbox(slide, 0.3, rail_text_top, rail_left_in - 0.5, 0.6, "Phases: " + ", ".join(it.phases), 12, False, WHITE)
+    rail_text_top += 0.5
+    _add_textbox(slide, 0.3, rail_text_top, rail_left_in - 0.5, 0.6, "Platforms: " + ", ".join(it.platforms), 12, False, WHITE)
+    rail_text_top += 0.5
+    _add_textbox(slide, 0.3, rail_text_top, rail_left_in - 0.5, 0.6, "Audience: " + ", ".join(it.audience), 12, False, WHITE)
+    rail_text_top += 0.5
+    if it.url:
+        _add_textbox(slide, 0.3, rail_text_top, rail_left_in - 0.5, 0.6, it.url, 10, False, WHITE)
+
+    # Speaker notes (branding summary etc., optional)
+    notes = slide.notes_slide.notes_text_frame
+    notes.text = (
+        f"{it.title}\n\n"
+        f"URL: {it.url}\n"
+        f"ID: {it.roadmap_id}\n"
+        f"Month: {it.month}\n"
+        f"Products: {', '.join(it.products)}\n"
+        f"Platforms: {', '.join(it.platforms)}\n"
+        f"Phases: {', '.join(it.phases)}\n"
+        f"Audience: {', '.join(it.audience)}\n"
     )
 
-    # Right rail contents
-    # Status icon + text
-    icon_key = pick_status_icon_key(item.status)
-    icon_path = path_if_exists(assets.get(icon_key))
-    add_picture_safe(slide, icon_path, left_in=rail_left_in + 0.3, top_in=0.6, height_in=0.5)
-    add_text_box(slide, item.status or "Status unknown",
-                 left_in=rail_left_in + 0.95, top_in=0.63, width_in=rail_width_in - 1.25, height_in=0.4,
-                 size_pt=18, color=WHITE)
+    return slide
 
-    # Month/date pill
-    add_text_box(
-        slide, month_str or item.month or item.date_str,
-        left_in=rail_left_in + 0.3, top_in=1.25, width_in=rail_width_in - 0.6, height_in=0.45,
-        size_pt=20, color=WHITE
-    )
+def add_thankyou_slide(prs: Any, bg_path: Optional[str] = None, logo_path: Optional[str] = None) -> Any:
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _add_picture_cover(slide, prs, bg_path)
+    _add_textbox(slide, 1.8, 2.2, 8.0, 1.0, "Thank you!", 40, True, WHITE, PP_ALIGN.LEFT)
+    if logo_path and os.path.isfile(logo_path):
+        slide.shapes.add_picture(logo_path, Inches(11.0), Inches(0.8), width=Inches(1.8))
+    return slide
 
-    # Audience row with icons (best-effort)
-    # Expect optional assets: admin.png, user.png, check.png
-    aud_y = 1.9
-    check = path_if_exists(assets.get("check"))
-    admin_icon = path_if_exists(assets.get("admin"))
-    user_icon = path_if_exists(assets.get("user"))
-
-    # Admin
-    if admin_icon:
-        add_picture_safe(slide, admin_icon, left_in=rail_left_in + 0.3, top_in=aud_y, height_in=0.35)
-    add_text_box(slide, "Admin", left_in=rail_left_in + 0.8, top_in=aud_y, width_in=1.2, height_in=0.35,
-                 size_pt=16, color=WHITE)
-    if "admin" in (item.audience or "").lower() and check:
-        add_picture_safe(slide, check, left_in=rail_left_in + rail_width_in - 0.7, top_in=aud_y, height_in=0.3)
-
-    # End user
-    aud_y2 = aud_y + 0.55
-    if user_icon:
-        add_picture_safe(slide, user_icon, left_in=rail_left_in + 0.3, top_in=aud_y2, height_in=0.35)
-    add_text_box(slide, "End User", left_in=rail_left_in + 0.8, top_in=aud_y2, width_in=1.2, height_in=0.35,
-                 size_pt=16, color=WHITE)
-    if "user" in (item.audience or "").lower() and check:
-        add_picture_safe(slide, check, left_in=rail_left_in + rail_width_in - 0.7, top_in=aud_y2, height_in=0.3)
-
-    # Roadmap ID + link (bottom of rail)
-    bottom_y = sh_in - 1.1
-    add_text_box(slide, f"ID: {item.roadmap_id or '—'}",
-                 left_in=rail_left_in + 0.3, top_in=bottom_y, width_in=rail_width_in - 0.6, height_in=0.35,
-                 size_pt=16, color=WHITE)
-    add_text_box(slide, item.url or "",
-                 left_in=rail_left_in + 0.3, top_in=bottom_y + 0.4, width_in=rail_width_in - 0.6, height_in=0.5,
-                 size_pt=12, color=WHITE)
-
-    # Speaker notes: put the long/verbose blob
-    add_notes(slide, item.notes or item.summary or item.title)
-
-
-# ----------------------------
+# -------------------------
 # Build
-# ----------------------------
-def build(inputs: List[str], output_path: str, month: Optional[str], assets: dict,
-          template: Optional[str], rail_width: float, conclusion_links: Optional[List[Tuple[str, str]]] = None):
-    prs = Presentation(template) if (template and os.path.exists(template)) else Presentation()
+# -------------------------
+def build(
+    inputs: List[str],
+    output_path: str,
+    month_str: str,
+    assets: Dict[str, Optional[str]],
+    template: Optional[str],
+    rail_width: float = 3.5,
+) -> None:
+    # Load template or default
+    prs = pptx.Presentation(template) if template else pptx.Presentation()
 
-    # Core section slides
-    add_cover_slide(prs, assets, assets.get("cover_title"), assets.get("cover_dates"),
-                    assets.get("logo"), assets.get("logo2"))
-    add_agenda_slide(prs, assets)
+    # Optional cover
+    add_cover_slide(
+        prs,
+        month_str=month_str,
+        cover_title=_clean(assets.get("cover_title")),
+        cover_dates=_clean(assets.get("cover_dates")),
+        bg_path=assets.get("cover"),
+        logo_path=assets.get("logo"),
+        logo2_path=assets.get("logo2"),
+    )
 
-    # Parse items
-    items = parse_html_items(inputs)
+    # Agenda (optional)
+    if assets.get("agenda_bg"):
+        add_separator_slide(prs, "Agenda", assets.get("agenda_bg"))
 
-    # Optional: per-product separators before items
-    if items:
-        # Group by product (stable order by first appearance)
-        seen = {}
-        groups: Dict[str, List[Item]] = {}
-        for it in items:
-            k = (it.product or "General").strip()
-            if k not in seen:
-                seen[k] = True
-                groups[k] = []
-            groups[k].append(it)
+    # Parse all inputs
+    all_items: List[Item] = []
+    for path in inputs:
+        if not path or not os.path.isfile(path):
+            continue
+        all_items.extend(parse_roadmap_html(path))
 
-        for product, group_items in groups.items():
-            sep_title = f"{product} — {month or ''}".strip(" —")
-            add_separator_slide(prs, assets, sep_title)
-            for it in group_items:
-                add_item_slide(
-                    prs, it, month_str=month,
-                    assets=assets,
-                    rail_width_in=rail_width,
-                    brand_bg=assets.get("brand_bg")
-                )
+    # Items separator
+    if assets.get("separator"):
+        add_separator_slide(prs, "Roadmap Items", assets.get("separator"))
 
-    # Conclusion + Thank you
-    if not conclusion_links:
-        conclusion_links = [
-            ("Microsoft Security", "https://www.microsoft.com/en-us/security"),
-            ("Azure Updates", "https://azure.microsoft.com/en-us/updates/"),
-            ("Dynamics 365 & Power Platform", "https://www.microsoft.com/en-us/dynamics-365/?culture=en-us&country=us"),
-            ("Technical Documentation", "https://learn.microsoft.com/en-us/docs/?culture=en-us&country=us"),
-        ]
-    add_conclusion_slide(prs, assets, conclusion_links)
-    add_thankyou_slide(prs, assets)
+    # Each item slide
+    rail_left_in: float = 0.0
+    for it in all_items:
+        add_item_slide(
+            prs=prs,
+            it=it,
+            month_str=month_str or it.month,
+            rail_left_in=rail_left_in,
+            rail_width_in=rail_width,
+            assets=assets,
+        )
 
-    actual = _safe_save(prs, output_path)
-    print(f"[ok] Deck saved to: {actual}")
+    # Conclusion / Thank you
+    if assets.get("conclusion_bg"):
+        add_separator_slide(prs, "Wrap Up", assets.get("conclusion_bg"))
 
+    add_thankyou_slide(prs, bg_path=assets.get("thankyou"), logo_path=assets.get("logo"))
 
-# ----------------------------
+    # Save
+    prs.save(output_path)
+
+# -------------------------
 # CLI
-# ----------------------------
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("-i", "--inputs", nargs="+", required=True, help="One or more HTML inputs (Roadmap/Message Center)")
-    p.add_argument("-o", "--output", required=True, help="Output .pptx")
-    p.add_argument("--month", default="", help="Month label like 'September 2025'")
-    # assets
-    p.add_argument("--cover", dest="cover", default="", help="Cover background image")
-    p.add_argument("--agenda-bg", dest="agenda_bg", default="", help="Agenda background image")
-    p.add_argument("--separator", dest="separator", default="", help="Separator background image")
-    p.add_argument("--conclusion-bg", dest="conclusion_bg", default="", help="Conclusion background image")
-    p.add_argument("--thankyou", dest="thankyou", default="", help="Thank-you background image")
-    p.add_argument("--brand-bg", dest="brand_bg", default="", help="Generic brand background for item slides")
-    p.add_argument("--cover-title", dest="cover_title", default="", help="Cover title text")
-    p.add_argument("--cover-dates", dest="cover_dates", default="", help="Cover dates text")
-    p.add_argument("--separator-title", dest="separator_title", default="", help="(unused; separators auto from product)")
-    p.add_argument("--logo", dest="logo", default="", help="Logo 1 (e.g., Parex)")
-    p.add_argument("--logo2", dest="logo2", default="", help="Logo 2 (e.g., customer)")
-    p.add_argument("--rocket", dest="rocket", default="", help="Path to rocket icon")
-    p.add_argument("--magnifier", dest="magnifier", default="", help="Path to magnifier icon")
-    p.add_argument("--admin", dest="admin", default="", help="Admin target-audience icon")
-    p.add_argument("--user", dest="user", default="", help="User target-audience icon")
-    p.add_argument("--check", dest="check", default="", help="Green check icon")
-    p.add_argument("--template", dest="template", default="", help="Optional template .pptx")
-    p.add_argument("--rail-width", dest="rail_width", default=str(DEFAULT_RAIL_WIDTH_IN), help="Right rail width in inches (default 3.5)")
-
-    args = p.parse_args()
-
-    assets = {
-        "cover": path_if_exists(args.cover),
-        "agenda": path_if_exists(args.agenda_bg),
-        "separator": path_if_exists(args.separator),
-        "conclusion": path_if_exists(args.conclusion_bg),
-        "thankyou": path_if_exists(args.thankyou),
-        "brand_bg": path_if_exists(args.brand_bg),
-        "cover_title": args.cover_title or "M365 Technical Update Briefing",
-        "cover_dates": args.cover_dates or args.month or "",
-        "logo": path_if_exists(args.logo),
-        "logo2": path_if_exists(args.logo2),
-        "rocket": path_if_exists(args.rocket) or path_if_exists(os.path.join("assets", "rocket.png")),
-        "magnifier": path_if_exists(args.magnifier) or path_if_exists(os.path.join("assets", "magnifier.png")),
-        "admin": path_if_exists(args.admin) or path_if_exists(os.path.join("assets", "admin.png")),
-        "user": path_if_exists(args.user) or path_if_exists(os.path.join("assets", "user.png")),
-        "check": path_if_exists(args.check) or path_if_exists(os.path.join("assets", "check.png")),
+# -------------------------
+def _assets_dict_from_args(args: argparse.Namespace) -> Dict[str, Optional[str]]:
+    return {
+        "cover": args.cover,
+        "agenda_bg": args.agenda_bg,
+        "separator": args.separator,
+        "conclusion_bg": args.conclusion_bg,
+        "thankyou": args.thankyou,
+        "brand_bg": args.brand_bg,
+        "cover_title": args.cover_title,
+        "cover_dates": args.cover_dates,
+        "separator_title": args.separator_title,
+        "logo": args.logo,
+        "logo2": args.logo2,
+        "rocket": args.rocket,
+        "magnifier": args.magnifier,
     }
 
-    rail_w = float(args.rail_width) if args.rail_width else DEFAULT_RAIL_WIDTH_IN
+def month_display_str(raw_month: Optional[str]) -> str:
+    if raw_month:
+        return raw_month
+    today = dt.date.today()
+    return today.strftime("%b %Y")
 
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("-i", "--inputs", nargs="+", required=True, help="One or more HTML files")
+    p.add_argument("-o", "--output", required=True, help="Output PPTX path")
+    p.add_argument("--month", default="", help="Display month (e.g., 'Aug 2025')")
+    p.add_argument("--cover", default=None)
+    p.add_argument("--agenda-bg", dest="agenda_bg", default=None)
+    p.add_argument("--separator", default=None)
+    p.add_argument("--conclusion-bg", dest="conclusion_bg", default=None)
+    p.add_argument("--thankyou", default=None)
+    p.add_argument("--brand-bg", dest="brand_bg", default=None)
+    p.add_argument("--cover-title", dest="cover_title", default="Technical Update Briefing")
+    p.add_argument("--cover-dates", dest="cover_dates", default="")
+    p.add_argument("--separator-title", dest="separator_title", default="Roadmap Items")
+    p.add_argument("--logo", default=None)
+    p.add_argument("--logo2", default=None)
+    p.add_argument("--rocket", default=None)
+    p.add_argument("--magnifier", default=None)
+    p.add_argument("--template", default=None)
+    p.add_argument("--rail-width", dest="rail_width", type=float, default=3.5)
+    args = p.parse_args()
+    assets = _assets_dict_from_args(args)
+    
+    print(f"[ppt_builder] Total parsed items: {len(items)} from {len(inputs)} input file(s)")
+
+    
     build(
         inputs=args.inputs,
         output_path=args.output,
-        month=args.month or "",
+        month_str=month_display_str(args.month),
         assets=assets,
         template=args.template or None,
-        rail_width=rail_w,
-        conclusion_links=None
+        rail_width=float(args.rail_width or 3.5),
     )
-
 
 if __name__ == "__main__":
     main()
