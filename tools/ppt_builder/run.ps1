@@ -1,235 +1,296 @@
-#requires -Version 7.0
-<#
-.SYNOPSIS
-  Wrapper for generate_deck.py that supports JSON config or CLI args.
+<# =====================================================================
+   run.ps1  —  M365 Roadmap Deck runner
+   - Reads deck.config.json (or accepts overrides)
+   - Resolves paths relative to the JSON file’s folder (fallbacks provided)
+   - Calls the venv python to run generate_deck.py with correct args
+   - Verbose logging shows exactly which inputs/assets are used
+   ===================================================================== #>
 
-.EXAMPLES
-  ./run.ps1 -Config ./deck.config.json
-  ./run.ps1 -Inputs ./RoadmapPrimarySource.html -Output ./RoadmapDeck_AutoGen.pptx
-#>
-
+[CmdletBinding()]
 param(
+  # Optional JSON config (recommended). Example: tools\ppt_builder\deck.config.json
   [string]$Config,
+
+  # Optional overrides (take precedence over JSON):
   [string[]]$Inputs,
   [string]$Output,
   [string]$Month,
-  [double]$RailWidth,
-  [string]$Template,            # accepts absolute or relative path
-  [hashtable]$Assets,           # optional hashtable of asset overrides
-  [switch]$VerbosePython        # show full python command
+  [string]$CoverTitle,
+  [string]$CoverDates,
+  [string]$SeparatorTitle,
+  [string]$Cover,
+  [string]$AgendaBg,
+  [string]$Separator,
+  [string]$ConclusionBg,
+  [string]$ThankYou,
+  [string]$BrandBg,
+  [string]$Logo,
+  [string]$Logo2,
+  [string]$Rocket,
+  [string]$Magnifier,
+  [string]$Template,
+  [double]$RailWidth = 3.5,
+
+  # Advanced
+  [switch]$DryRun   # Just print the computed command; do not execute
 )
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+# --- Constants & Script Roots -------------------------------------------------
 
-function _Read-JsonAsHashtable {
-  param([Parameter(Mandatory)][string]$Path)
-  if (-not (Test-Path -LiteralPath $Path)) {
-    throw "Config not found: $Path"
-  }
-  try {
-    (Get-Content -LiteralPath $Path -Raw) | ConvertFrom-Json -AsHashtable
-  } catch {
-    throw "Failed to parse JSON config: $Path. $_"
-  }
+$script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:RepoRoot  = Split-Path -Parent (Split-Path -Parent $script:ScriptDir)  # ...\tools
+if (-not (Test-Path $script:RepoRoot)) { $script:RepoRoot = (Get-Location).Path }
+
+$script:ConfigDir = $script:ScriptDir   # default; updated below if -Config supplied
+
+# Try to use venv python in this folder; fallback to py -3.12
+$script:VenvPython = Join-Path $script:ScriptDir ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $script:VenvPython)) {
+  # fallback: system launcher
+  $script:VenvPython = "py"
 }
 
-function _To-Array {
-  param($Value)
-  if ($null -eq $Value) { return @() }
-  if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) { return @($Value) }
-  return @("$Value")
+$script:GeneratePy = Join-Path $script:ScriptDir "generate_deck.py"
+
+# --- Helpers ------------------------------------------------------------------
+
+function Write-Header([string]$Text) {
+  Write-Host ""
+  Write-Host "=== $Text ===" -ForegroundColor Cyan
+}
+
+function _Read-Json([string]$Path) {
+  try {
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    return $raw | ConvertFrom-Json -AsHashtable
+  } catch {
+    Write-Warning "Failed to read JSON '$Path' : $($_.Exception.Message)"
+    return $null
+  }
 }
 
 function _Resolve-PathOrNull {
   param(
     [Parameter(Mandatory)][string]$PathLike,
-    [string]$BaseDir = $null  # resolve relative to this directory first
+    [string]$BaseDir = $null
   )
   try {
-    # If it’s already rooted and exists, return it.
     if ([System.IO.Path]::IsPathRooted($PathLike)) {
       return (Test-Path -LiteralPath $PathLike) ? (Resolve-Path -LiteralPath $PathLike).Path : $null
     }
 
     $candidates = @()
 
-    if ($BaseDir) {
-      $candidates += (Join-Path -Path $BaseDir -ChildPath $PathLike)
-    }
-
-    # Also try relative to repo root (if available) and script root
-    if ($script:RepoRoot) {
-      $candidates += (Join-Path -Path $script:RepoRoot -ChildPath $PathLike)
-    }
-
-    # Directory of the JSON config file (or the script dir if -Config not provided)
-    $ConfigPath = $null
-    if ($PSBoundParameters.ContainsKey('Config')) {
-      $ConfigPath = (Resolve-Path -LiteralPath $Config).Path
-    }
-    $script:ConfigDir = if ($ConfigPath) { Split-Path -Parent $ConfigPath } else { $PSScriptRoot }
-
-
-    $candidates += (Join-Path -Path $PSScriptRoot -ChildPath $PathLike)
+    if ($BaseDir)                     { $candidates += (Join-Path -Path $BaseDir -ChildPath $PathLike) }
+    if ($script:RepoRoot)             { $candidates += (Join-Path -Path $script:RepoRoot -ChildPath $PathLike) }
+    if ($script:ScriptDir)            { $candidates += (Join-Path -Path $script:ScriptDir -ChildPath $PathLike) }
     $candidates += (Join-Path -Path (Get-Location).Path -ChildPath $PathLike)
 
     foreach ($c in $candidates) {
-      if (Test-Path -LiteralPath $c) {
-        return (Resolve-Path -LiteralPath $c).Path
-      }
+      if (Test-Path -LiteralPath $c) { return (Resolve-Path -LiteralPath $c).Path }
     }
     return $null
-  } catch {
-    return $null
-  }
+  } catch { return $null }
 }
 
-function _Pick {
-  <#
-    Returns the first non-empty value among: explicit param, config key(s), fallback.
-    $Keys can be a single key-name or an array of alternates (case-insensitive).
-  #>
+function _Pick([hashtable]$Cfg, [string]$Key, [object]$Override) {
+  if ($PSBoundParameters.ContainsKey($Key) -and $null -ne $Override -and ($Override -ne "")) { return $Override }
+  if ($Cfg -and $Cfg.ContainsKey($Key) -and $null -ne $Cfg[$Key] -and ($Cfg[$Key] -ne ""))   { return $Cfg[$Key] }
+  return $null
+}
+
+# Returns array of "--FLAG", "value" pairs for a single asset path
+function _AssetFlag([string]$Flag, [string]$PathLike, [string]$BaseDir) {
+  if (-not $PathLike) { return @() }
+  $resolved = _Resolve-PathOrNull -PathLike $PathLike -BaseDir $BaseDir
+  if ($resolved) { return @("--$Flag", $resolved) }
+  Write-Warning "Asset not found for --$Flag : $PathLike  (base '$BaseDir')"
+  return @()
+}
+
+function _Ensure-OutputPath([string]$PathLike, [string]$BaseDir) {
+  $candidate = if ($PathLike) { $PathLike } else { "RoadmapDeck_AutoGen.pptx" }
+  $full = _Resolve-PathOrNull -PathLike $candidate -BaseDir $BaseDir
+  if (-not $full) {
+    # If the parent exists, build a full path there; else put in current folder
+    $parent = Split-Path -Parent (Join-Path -Path $BaseDir -ChildPath $candidate)
+    if (-not (Test-Path -LiteralPath $parent)) { $parent = (Get-Location).Path }
+    $full = Join-Path -Path $parent -ChildPath (Split-Path -Leaf $candidate)
+  }
+  return $full
+}
+
+function _Build-Argv {
   param(
-    $ParamValue,
-    [hashtable]$Cfg,
-    [object]$Keys,
-    $Fallback = $null
+    [hashtable]$Cfg
   )
-  if ($PSBoundParameters.ContainsKey('ParamValue') -and $ParamValue) { return $ParamValue }
-  if ($Cfg) {
-    $tryKeys = @()
-    if ($Keys -is [string]) { $tryKeys = @($Keys) } else { $tryKeys = @($Keys) }
-    foreach ($k in $tryKeys) {
-      foreach ($kv in $Cfg.GetEnumerator()) {
-        if ($kv.Key -ieq $k -and $kv.Value) { return $kv.Value }
-      }
+
+  # Resolve Inputs relative to the config directory
+  $inputsRaw = @()
+  if ($PSBoundParameters.ContainsKey('Inputs') -and $Inputs) { $inputsRaw = @($Inputs) }
+  elseif ($Cfg -and $Cfg.ContainsKey('Inputs')) { $inputsRaw = @($Cfg.Inputs) }
+
+  $inputsResolved = @()
+  foreach ($raw in $inputsRaw) {
+    if (-not $raw) { continue }
+    $p = _Resolve-PathOrNull -PathLike $raw -BaseDir $script:ConfigDir
+    if ($p) { $inputsResolved += $p } else { Write-Warning "Input not found: $raw  (base '$($script:ConfigDir)')" }
+  }
+
+  if ($inputsResolved.Count -eq 0) {
+    Write-Warning "No valid input files resolved — the deck will only contain shell slides."
+  }
+
+  # Output path
+  $outWanted = _Pick $Cfg 'Output' $Output
+  $outFull   = _Ensure-OutputPath -PathLike $outWanted -BaseDir $script:ConfigDir
+
+  # Prevent ‘file in use’ errors: if cannot open for write, add timestamp
+  try {
+    $fs = [System.IO.File]::Open($outFull, 'OpenOrCreate', 'ReadWrite', 'None')
+    $fs.Close()
+  } catch {
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $leaf  = [System.IO.Path]::GetFileNameWithoutExtension($outFull)
+    $ext   = [System.IO.Path]::GetExtension($outFull)
+    $dir   = Split-Path -Parent $outFull
+    $alt   = Join-Path $dir "$leaf`_$stamp$ext"
+    Write-Warning "Output appears locked. Writing to: $alt"
+    $outFull = $alt
+  }
+
+  $argv = @()
+
+  if ($inputsResolved.Count -gt 0) {
+    $argv += '-i'
+    $argv += $inputsResolved
+  }
+
+  $argv += @('-o', $outFull)
+
+  # Simple scalar flags
+  $scalars = @(
+    @{ key='Month';          flag='--month' },
+    @{ key='CoverTitle';     flag='--cover-title' },
+    @{ key='CoverDates';     flag='--cover-dates' },
+    @{ key='SeparatorTitle'; flag='--separator-title' },
+    @{ key='Template';       flag='--template' }
+  )
+
+  foreach ($m in $scalars) {
+    $val = _Pick $Cfg $m.key (Get-Variable -Name $m.key -ValueOnly -ErrorAction SilentlyContinue)
+    if ($val) { $argv += @($m.flag, $val) }
+  }
+
+  # Numeric rail width
+  $rw = $RailWidth
+  if (-not $PSBoundParameters.ContainsKey('RailWidth') -and $Cfg -and $Cfg.ContainsKey('RailWidth')) {
+    $rw = [double]$Cfg['RailWidth']
+  }
+  if ($rw -gt 0) { $argv += @('--rail-width', "$rw") }
+
+  # Asset flags (each is a single path)
+  $assetPairs = @(
+    @{ flag='cover';         key='Cover' },
+    @{ flag='agenda-bg';     key='AgendaBg' },
+    @{ flag='separator';     key='Separator' },
+    @{ flag='conclusion-bg'; key='ConclusionBg' },
+    @{ flag='thankyou';      key='ThankYou' },
+    @{ flag='brand-bg';      key='BrandBg' },
+    @{ flag='logo';          key='Logo' },
+    @{ flag='logo2';         key='Logo2' },
+    @{ flag='rocket';        key='Rocket' },
+    @{ flag='magnifier';     key='Magnifier' }
+  )
+
+  foreach ($ap in $assetPairs) {
+    $val = _Pick $Cfg $ap.key (Get-Variable -Name $ap.key -ValueOnly -ErrorAction SilentlyContinue)
+    if ($val) {
+      $argv += (_AssetFlag -Flag $ap.flag -PathLike $val -BaseDir $script:ConfigDir)
     }
   }
-  return $Fallback
+
+  # Final log
+  Write-Header "Resolved Inputs"
+  if ($inputsResolved.Count -gt 0) { $inputsResolved | ForEach-Object { Write-Host "  - $_" } }
+  else { Write-Host "  (none)" }
+
+  Write-Header "Output"
+  Write-Host "  $outFull"
+
+  Write-Header "Command Preview"
+  $preview = @($script:VenvPython, $script:GeneratePy) + $argv
+  Write-Host "  $($preview -join ' ')"
+
+  return $argv
 }
 
-
-
-# Example inside your asset loop when fetching each path:
-$p = _Get-Asset -Cfg $cfg -Keys $assetMap[$flag]
-if ($p) {
-  $p2 = _Resolve-PathOrNull -PathLike $p -BaseDir $script:ConfigDir
-  if ($p2) { $assetArgs += @("--$flag", $p2) }
-}
-
-
-
-
-
-# --- Load config if provided ---
-$cfg = @{}
-if ($Config) { $cfg = _Read-JsonAsHashtable -Path $Config }
-
-# --- Coalesce inputs ---
-# Accept multiple spellings so we don’t get blocked:
-#   Inputs | Input | Source | Sources | Html | Files
-$inputsAny = _Pick -ParamValue $Inputs -Cfg $cfg -Keys @(
-  'Inputs','Input','Source','Sources','Html','Files'
-)
-$inputs = @()
-foreach ($x in _To-Array $inputsAny) {
-  $r = _Resolve-PathOrNull $x
-  if ($r) { $inputs += $r } else { Write-Warning "Input not found (skipped): $x" }
-}
-if (-not $inputs -or $inputs.Count -eq 0) {
-  throw "No inputs resolved. Provide -Inputs or put an 'Inputs' array in your config JSON."
-}
-
-# --- Other options ---
-$outPath   = _Pick -ParamValue $Output    -Cfg $cfg -Keys @('Output','Out','Deck','OutputPath') -Fallback 'RoadmapDeck_AutoGen.pptx'
-$monthVal  = _Pick -ParamValue $Month     -Cfg $cfg -Keys @('Month','MonthStr','CoverMonth')
-$templateP = _Pick -ParamValue $Template  -Cfg $cfg -Keys @('Template','TemplatePath')
-if ($templateP) { $templateP = _Resolve-PathOrNull $templateP }
-
-# Rail width (float), allow ints too
-$rail = $null
-if ($PSBoundParameters.ContainsKey('RailWidth') -and $RailWidth) { $rail = [double]$RailWidth }
-elseif ($cfg.ContainsKey('RailWidth')) { $rail = [double]$cfg.RailWidth }
-elseif ($cfg.ContainsKey('Rail') -and $cfg.Rail) { $rail = [double]$cfg.Rail }
-else { $rail = 3.5 }
-
-
-# --- Resolve optional assets (support snake_case and PascalCase) ---
-# map of CLI flag name => accepted config keys
-$assetMap = @{
-  'brand-bg'      = @('brand_bg','BrandBg')
-  'cover'         = @('cover','Cover')
-  'agenda-bg'     = @('agenda_bg','AgendaBg')
-  'separator'     = @('separator','Separator')
-  'conclusion-bg' = @('conclusion_bg','ConclusionBg')
-  'thankyou'      = @('thankyou','ThankYou')
-  'logo'          = @('logo','Logo')
-  'logo2'         = @('logo2','Logo2')
-  'rocket'        = @('rocket','Rocket')
-  'magnifier'     = @('magnifier','Magnifier')
-}
-
-$assetArgs = @()
-foreach ($flag in $assetMap.Keys) {
-  $p = _Get-Asset -Cfg $cfg -Keys $assetMap[$flag]
-  if ($p) { $assetArgs += @("--$flag", $p) }
-}
-
-
-# --- Python and generator path ---
-$venvPy = Join-Path $PSScriptRoot ".venv/Scripts/python.exe"
-if (-not (Test-Path -LiteralPath $venvPy)) { $venvPy = 'python' }
-$gen = Join-Path $PSScriptRoot 'generate_deck.py'
-if (-not (Test-Path -LiteralPath $gen)) {
-  throw "Generator not found: $gen"
-}
-
-# --- Build argv for python script ---
-$argv = @()
-
-# inputs
-$argv += @('-i') + $inputs
-
-# output
-$argv += @('-o', $outPath)
-
-# month
-if ($monthVal) { $argv += @('--month', "$monthVal") }
-
-# template
-if ($templateP) { $argv += @('--template', $templateP) }
-
-# rail width
-if ($rail) { $argv += @('--rail-width', ("{0:0.###}" -f $rail)) }
-
-
-# cover/separator text (optional)
-$coverTitle  = _Pick -ParamValue $CoverTitle     -Cfg $cfg -Keys @('CoverTitle')
-$coverDates  = _Pick -ParamValue $CoverDates     -Cfg $cfg -Keys @('CoverDates')
-$sepTitle    = _Pick -ParamValue $SeparatorTitle -Cfg $cfg -Keys @('SeparatorTitle')
-
-if ($coverTitle) { $argv += @('--cover-title',  $coverTitle) }
-if ($coverDates) { $argv += @('--cover-dates',  $coverDates) }
-if ($sepTitle)   { $argv += @('--separator-title', $sepTitle) }
-
-
-
-
-# assets
-$argv += $assetArgs
-
-if ($VerbosePython) {
-  Write-Host "`n> $venvPy `"$gen`" $($argv -join ' ')" -ForegroundColor Cyan
-}
-
-# --- Run ---
-try {
-  & $venvPy $gen @argv
-} catch {
-  if ($_.Exception -and $_.Exception.Message -match 'Permission denied.*\.pptx') {
-    Write-Error "Failed to write '$outPath'. Close the deck if it is open and try again."
-  } else {
-    throw
+function _Ensure-Deps {
+  # Only if we found a real Python exe (not the py launcher).
+  $isRealExe = ($script:VenvPython -ne 'py' -and (Test-Path -LiteralPath $script:VenvPython))
+  if (-not $isRealExe) {
+    Write-Verbose "Using 'py' launcher; assuming dependencies are available."
+    return
   }
+
+  & $script:VenvPython -m pip install --upgrade pip *> $null
+  & $script:VenvPython -m pip install python-pptx beautifulsoup4 lxml Pillow XlsxWriter *> $null
+}
+
+function Invoke-DeckBuilder([hashtable]$Cfg) {
+  if (-not (Test-Path -LiteralPath $script:GeneratePy)) {
+    throw "generate_deck.py not found at: $script:GeneratePy"
+  }
+  _Ensure-Deps
+
+  $argv = _Build-Argv -Cfg $Cfg
+
+  if ($DryRun) {
+    Write-Header "DryRun"
+    Write-Host "Skipping execution."
+    return
+  }
+
+  Write-Header "Running"
+  if ($script:VenvPython -eq 'py') {
+    # Use py -3.12 if available
+    & py -3.12 $script:GeneratePy @argv
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "py -3.12 failed; retrying with 'py' default"
+      & py $script:GeneratePy @argv
+    }
+  } else {
+    & $script:VenvPython $script:GeneratePy @argv
+  }
+
+  if ($LASTEXITCODE -ne 0) {
+    throw "generate_deck.py exited with code $LASTEXITCODE"
+  }
+}
+
+# --- Main ---------------------------------------------------------------------
+
+Write-Header "Deck Runner"
+
+$cfg = $null
+if ($PSBoundParameters.ContainsKey('Config') -and $Config) {
+  $cfgPath = (Resolve-Path -LiteralPath $Config -ErrorAction SilentlyContinue)
+  if (-not $cfgPath) { throw "Config not found: $Config" }
+  $cfg = _Read-Json $cfgPath.Path
+  if (-not $cfg) { throw "Failed to read/parse JSON config: $($cfgPath.Path)" }
+  $script:ConfigDir = Split-Path -Parent $cfgPath.Path
+  Write-Verbose "Using config: $($cfgPath.Path)"
+  Write-Verbose "ConfigDir:    $script:ConfigDir"
+} else {
+  Write-Verbose "No config provided; using only parameter overrides."
+  $script:ConfigDir = $script:ScriptDir
+}
+
+try {
+  Invoke-DeckBuilder -Cfg $cfg
+  Write-Host "`nDone." -ForegroundColor Green
+} catch {
+  Write-Error $_
+  exit 1
 }

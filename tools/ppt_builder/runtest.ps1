@@ -7,8 +7,8 @@ $Stamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
 $Out   = Join-Path $Here ("RoadmapDeck_SMOKE_{0}.pptx" -f $Stamp)
 
 & $Py "generate_deck.py" `
-  -i (Join-Path $Here "RoadmapPrimarySource.html") `
-  -o $Out `
+  -i "..\tools\roadmap\RoadmapPrimarySource.html", "..\tools\message_center\MessageCenterBriefingSuppliments.html" `
+  -o "c:\technical_update_briefings\RoadmapDeck_AutoGen.pptx"`
   --month ((Get-Date).ToString("MMMM yyyy")) `
   --cover (Join-Path $Here "assets\cover.png") `
   --agenda-bg (Join-Path $Here "assets\agenda.png") `
@@ -22,7 +22,6 @@ $Out   = Join-Path $Here ("RoadmapDeck_SMOKE_{0}.pptx" -f $Stamp)
   --logo (Join-Path $Here "assets\parex-logo.png") `
   --logo2 (Join-Path $Here "assets\customer-logo.png") `
   --rocket (Join-Path $Here "assets\rocket.png") `
-  --magnifier (Join-Path $Here "assets\magnifier.png") `
-  --admin (Join-Path $Here "assets\admin.png") `
-  --user (Join-Path $Here "assets\user.png") `
-  --check (Join-Path $Here "assets\check.png")
+  --magnifier (Join-Path $Here "assets\magnifier.png")
+
+

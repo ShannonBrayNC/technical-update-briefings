@@ -1,0 +1,13 @@
+# Default owners
+* @ShannonBrayNC @ShannonBrayPT
+
+# Packages
+/packages/tab/    @ShannonBrayNC @ShannonBrayPT
+/packages/bot/    @ShannonBrayNC @ShannonBrayPT
+/packages/shared/ @ShannonBrayNC @ShannonBrayPT
+
+# Scripts & CI
+/build/           @ShannonBrayNC @ShannonBrayPT
+/tools/           @ShannonBrayNC @ShannonBrayPT
+/.github/         @ShannonBrayNC @ShannonBrayPT
+/docs/ADR/        @ShannonBrayNC @ShannonBrayPT

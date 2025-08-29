@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Propose an ADR
+    url: https://github.com/ShannonBrayNC/technical-update-briefings/issues/new?template=adr_proposal.yml
+    about: Use the ADR template to capture design decisions

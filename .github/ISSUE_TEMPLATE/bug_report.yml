@@ -1,0 +1,26 @@
+name: Bug report
+description: Something broke; help me reproduce and fix it
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and expected behavior.
+      placeholder: Expected X, but got Y…
+    validations: { required: true }
+  - type: input
+    id: repro
+    attributes:
+      label: Minimal repro steps
+      placeholder: 1) npm -w @suite/tab run client:dev …
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / console output
+      render: shell
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: Windows/PS7, Node v20.x, Pester 5.x, Vite 5.x

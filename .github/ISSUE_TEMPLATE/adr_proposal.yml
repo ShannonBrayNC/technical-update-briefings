@@ -1,0 +1,39 @@
+name: ADR proposal
+description: Record a design decision (Architecture Decision Record)
+labels: [ADR]
+body:
+  - type: input
+    id: id
+    attributes:
+      label: Proposed ADR number
+      placeholder: 0012
+    validations: { required: true }
+  - type: input
+    id: title
+    attributes:
+      label: Title
+      placeholder: For example, Conversation reference persistence via Azure Table
+    validations: { required: true }
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      placeholder: Why is this decision needed now?
+    validations: { required: true }
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision
+      placeholder: The choice we are making and how we will implement it.
+    validations: { required: true }
+  - type: textarea
+    id: consequences
+    attributes:
+      label: Consequences
+      placeholder: Trade-offs, risks, operational considerations.
+  - type: markdown
+    attributes:
+      value: |
+        Next steps
+        - Open a PR that adds docs/ADR/<number>-<kebab-title>.md
+        - Reference this issue in the PR description

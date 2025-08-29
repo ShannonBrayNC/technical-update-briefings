@@ -17,9 +17,10 @@ import datetime as dt
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
-
+import traceback  # only if you log tracebacks; harmless otherwise
 from bs4 import BeautifulSoup
 from bs4.element import Tag, NavigableString
+import re
 
 # python-pptx
 import pptx
@@ -68,14 +69,40 @@ def _clean(s: Any) -> str:
     return str(s).strip()
 
 def _txt(x: Any) -> str:
-    """Inner text for Tag/NavigableString; else empty."""
-    if isinstance(x, (Tag, NavigableString)):
+    if x is None:
+        return ""
+    if isinstance(x, NavigableString):
+        return str(x).strip()
+    if isinstance(x, Tag):
         return x.get_text(strip=True)
-    return ""
+    return str(x).strip()
 
 def _txt_or_none(x: Any) -> Optional[str]:
     t = _txt(x)
     return t if t else None
+
+
+def _href(a: Any) -> str:
+    """Return anchor href safely for Pylance/static typing."""
+    if isinstance(a, Tag) and a.has_attr("href"):
+        v = a.get("href")  # returns str | list[str] | None at runtime
+        return v if isinstance(v, str) else ""
+    return ""
+
+
+
+
+def safe_find_all(node: Any, name=None, **kwargs) -> List[Tag]:
+    if isinstance(node, Tag):
+        return [t for t in node.find_all(name, **kwargs) if isinstance(t, Tag)]
+    return []
+
+def safe_find(node: Any, name=None, **kwargs) -> Optional[Tag]:
+    if isinstance(node, Tag):
+        el = node.find(name, **kwargs)
+        return el if isinstance(el, Tag) else None
+    return None
+
 
 def _first_tag(parent: Any, name: str, **kwargs: Any) -> Optional[Tag]:
     """Return first child Tag (never a PageElement placeholder)."""
@@ -111,6 +138,30 @@ def _split_csv(text: str) -> List[str]:
 # -------------------------
 # Parsing (defensive)
 # -------------------------
+
+import inspect
+
+def _safe_item(**kwargs):
+    """
+    Call Item(**filtered_kwargs) where filtered_kwargs are limited
+    to the parameters actually accepted by Item's __init__.
+    Also provides light aliasing (summary -> description, status -> phases).
+    """
+    params = set(inspect.signature(Item).parameters.keys())
+
+    # light aliasing so either side compiles:
+    if "summary" in kwargs and "description" not in kwargs and "description" in params:
+        kwargs["description"] = kwargs["summary"]
+    if "status" in kwargs and "phases" not in kwargs and "phases" in params:
+        # single status -> single-phase list if phases is list-like; otherwise pass the string
+        if "phases" in params:
+            kwargs["phases"] = [kwargs["status"]] if isinstance(kwargs["status"], str) else kwargs["status"]
+
+    filtered = {k: v for k, v in kwargs.items() if k in params}
+    return Item(**filtered)
+
+
+
 def parse_roadmap_html(path: str) -> List[Item]:
     """
     Parse the HTML you exported for the Roadmap (or Message Center styled).
@@ -481,6 +532,290 @@ def build(
 # -------------------------
 # CLI
 # -------------------------
+
+def _read_html(path: str) -> str:
+    """Read text file as UTF-8 with a tolerant fallback."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except UnicodeDecodeError:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+
+def sniff_source(html: str) -> str:
+    """
+    Very light-weight heuristic to decide which parser to use.
+    Return 'roadmap', 'msgcenter', or 'unknown'.
+    """
+    txt = html.lower()
+    if "roadmap id" in txt or "feature id" in txt or "target audience" in txt:
+        return "roadmap"
+    if "message center" in txt or "mc" in txt and "id:" in txt:
+        return "msgcenter"
+    # fallbacks: look for common class/id hooks you’ve seen before
+    if 'class="ms-roadmap' in txt or 'data-roadmap-id=' in txt:
+        return "roadmap"
+    return "unknown"
+
+def parse_inputs(inputs: list[str], debug: bool = False):
+    """
+    Load each input, pick a parser, and aggregate Items.
+    Requires your existing parse_roadmap_html / parse_message_center_html functions.
+    """
+    all_items = []
+    for path in inputs:
+        try:
+            html = _read_html(path)
+            kind = sniff_source(html)
+            if debug:
+                print(f"[parse] {path} -> sniff='{kind}', size={len(html):,} bytes")
+
+            if kind == "roadmap":
+                items = parse_roadmap_html(html)  # your existing function
+            elif kind == "msgcenter":
+                items = parse_message_center_html(html)  # your existing function
+            else:
+                print(f"[warn] Could not determine format for: {path}. Skipping.")
+                items = []
+
+            if debug:
+                print(f"[parse] {path} -> {len(items)} item(s)")
+                for i, it in enumerate(items[:3]):
+                    title = getattr(it, "title", "(no title)")
+                    rid = getattr(it, "roadmap_id", getattr(it, "rid", ""))
+                    print(f"  - {i+1:02d}. {title} [{rid}]")
+
+            all_items.extend(items)
+        except Exception as ex:
+            print(f"[error] Exception parsing {path}: {ex}")
+            traceback.print_exc()
+
+    if debug:
+        print(f"[parse] TOTAL items: {len(all_items)}")
+    return all_items
+
+
+# --- small helpers (safe for Pylance) ----------------------------------------
+
+def _tx(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, (Tag, NavigableString)):
+        return x.get_text(strip=True)
+    return str(x).strip()
+
+def _csv_list(s: str) -> List[str]:
+    s = (s or "").strip()
+    if not s:
+        return []
+    # split on comma/semicolon/pipe and normalize
+    parts = [p.strip() for p in re.split(r"[;,|]", s) if p.strip()]
+    # de-dup while preserving order
+    seen: set[str] = set()
+    out: List[str] = []
+    for p in parts:
+        k = p.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(p)
+    return out
+
+def _first_roadmap_link(container: Tag) -> str:
+    # Prefer official roadmap links if present
+    for a in container.find_all("a", href=True):
+        href = _href(a)
+        href_l = href.lower()
+        if "microsoft-365/roadmap" in href_l or "office365/roadmap" in href_l or "roadmap" in href_l:
+            return href
+    # fallback: first link
+    a = container.find("a", href=True)
+    return _href(a)
+
+
+
+def _first_nonempty(*vals: str) -> str:
+    for v in vals:
+        if v and v.strip():
+            return v.strip()
+    return ""
+
+def _normalize_label(s: str) -> str:
+    # Make header/label matching tolerant
+    return (
+        (s or "")
+        .strip()
+        .lower()
+        .replace("feature id", "roadmap id")
+        .replace("id:", "id")
+        .replace("target audience", "audience")
+        .replace("status / phase", "status")
+        .replace("release phase", "status")
+        .replace("release", "status")
+        .replace("cloud instances", "cloud")
+    )
+
+# --- table-style parser -------------------------------------------------------
+
+def _parse_mc_table(table: Tag) -> List[Item]:
+    items: List[Item] = []
+    headers: List[str] = []
+    # collect headers
+    thead = table.find("thead")
+    if isinstance(thead, Tag):
+        ths = thead.find_all("th")
+        if ths:
+            headers = [_normalize_label(_tx(th)) for th in ths]
+    if not headers:
+        # try first row as header
+        first_tr = table.find("tr")
+        if isinstance(first_tr, Tag):
+            ths = first_tr.find_all(["th", "td"])
+            headers = [_normalize_label(_tx(th)) for th in ths]
+
+    if not headers:
+        return items
+
+    # map a few common columns
+    # we don't require all; we pick what we can find
+    def col_index(name_options: List[str]) -> Optional[int]:
+        for i, h in enumerate(headers):
+            for opt in name_options:
+                if opt in h:
+                    return i
+        return None
+
+    idx_title     = col_index(["title", "subject", "feature"])
+    idx_summary   = col_index(["summary", "description", "details"])
+    idx_id        = col_index(["roadmap id", "id"])
+    idx_status    = col_index(["status", "phase"])
+    idx_products  = col_index(["product", "products"])
+    idx_platforms = col_index(["platform", "platforms"])
+    idx_audience  = col_index(["audience"])
+    idx_date      = col_index(["date", "month", "published", "created", "modified"])
+
+    # iterate rows
+    for tr in safe_find_all(table, "tr"):
+        tds: List[Tag] = safe_find_all(tr, "td")
+        if not tds:
+            continue
+
+            # safe access helper: returns text of cell or default
+            def cell(i: Optional[int], default: str = "") -> str:
+                return _txt(tds[i]) if (i is not None and 0 <= i < len(tds)) else default
+
+            # ---- example extraction (adjust column indexes to your header map) ----
+            title     = cell(0)
+            rid       = cell(1)
+            desc      = cell(2)
+            status    = cell(3)
+            audience  = cell(4)
+            month_str = cell(5)
+
+            # prefer a link in an explicit column; else first <a> in the row
+            link_host: Any = tds[6] if 6 < len(tds) else tr
+            a = safe_find(link_host, "a")
+            url = (a.get("href") if a and isinstance(a.get("href"), str) else "") if a else ""
+
+            # build your Item here with whatever columns you actually have:
+            # items.append(Item(
+            #     title=title or "(untitled)",
+            #     summary=desc,
+            #     roadmap_id=rid,
+            #     url=url,
+            #     month=month_str,
+            #     products=[],         # or split a product column if you have one
+            #     platforms=[],
+            #     status=status,
+            #     audience=audience,
+            # 
+        #)
+    #)
+    return items
+
+# --- card/list-style parser ---------------------------------------------------
+
+def _parse_mc_cards(root: Tag) -> List[Item]:
+    items: List[Item] = []
+    # Example: fall back to tables if no card containers found
+    for tbl in safe_find_all(root, "table"):
+        # reuse the loop above inside here
+        for tr in safe_find_all(tbl, "tr"):
+            tds = safe_find_all(tr, "td")
+            if not tds:
+                continue
+            def cell(i: Optional[int], default: str = "") -> str:
+                return _txt(tds[i]) if (i is not None and 0 <= i < len(tds)) else default
+            title = cell(0); rid = cell(1); desc = cell(2); status = cell(3); audience = cell(4); month_str = cell(5)
+            a = safe_find(tr, "a"); url = a.get("href") if a and isinstance(a.get("href"), str) else ""
+            items.append(_safe_item(
+                title=title or "(untitled)",
+                summary=desc,
+                roadmap_id=rid,
+                url=url,
+                month=month_str,
+                products=[],
+                platforms=[],
+                status=status,
+                audience=audience,
+                description=desc
+            ))
+
+    return items
+
+
+# --- public entry -------------------------------------------------------------
+
+def parse_message_center_html(html: str) -> List[Item]:
+    """
+    Parse Message Center supplemental HTML into a list[Item].
+    Supports both table-based and card/list-based exports.
+    """
+    soup = BeautifulSoup(html or "", "lxml")
+    if not soup or not soup.find(True):
+        return []
+
+    items: List[Item] = []
+
+    # 1) Prefer table exports if we can detect header hints
+    best_table: Optional[Tag] = None
+    best_score = 0
+    for tbl in soup.find_all("table"):
+        if not isinstance(tbl, Tag):
+            continue
+        # score table by presence of expected headers
+        heads = [ _normalize_label(_tx(th)) for th in tbl.find_all("th") ]
+        score = sum(1 for h in heads if any(k in h for k in [
+            "title","subject","summary","description","roadmap id","id","status","product","platform","audience","date","month","created","modified"
+        ]))
+        if score > best_score:
+            best_score = score
+            best_table = tbl
+
+    if best_table is not None and best_score >= 2:
+        items.extend(_parse_mc_table(best_table))
+
+    # 2) Also scan for card/list style containers anywhere in the doc
+    items.extend(_parse_mc_cards(soup))
+
+    # 3) Deduplicate by (roadmap_id, title, url)
+    def _key(it: Item) -> tuple[str, str, str]:
+        return (
+            (it.roadmap_id or "").strip().lower(),
+            (it.title or "").strip().lower(),
+            (it.url or "").strip().lower(),
+        )
+    seen: set[tuple[str, str, str]] = set()
+    uniq: List[Item] = []
+    for it in items:
+        k = _key(it)
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(it)
+
+    return uniq
+
+
 def _assets_dict_from_args(args: argparse.Namespace) -> Dict[str, Optional[str]]:
     return {
         "cover": args.cover,
@@ -524,10 +859,30 @@ def main() -> None:
     p.add_argument("--magnifier", default=None)
     p.add_argument("--template", default=None)
     p.add_argument("--rail-width", dest="rail_width", type=float, default=3.5)
-    args = p.parse_args()
-    assets = _assets_dict_from_args(args)
+    p.add_argument("--debug-parse", action="store_true", help="Print parse diagnostics and sample titles.")
+    p.add_argument("--list-only", action="store_true", help="Parse inputs and print items without creating a PPTX.")
     
-    print(f"[ppt_builder] Total parsed items: {len(items)} from {len(inputs)} input file(s)")
+
+    args = p.parse_args()
+    assets = {
+        "cover": args.cover,
+        "agenda_bg": args.agenda_bg,
+        "separator": args.separator,
+        "conclusion_bg": args.conclusion_bg,
+        "thankyou": args.thankyou,
+        "brand_bg": args.brand_bg,
+        "logo": args.logo,
+        "logo2": args.logo2,
+        "rocket": args.rocket,
+        "magnifier": args.magnifier,
+        "admin": args.admin,
+        "user": args.user,
+        "check": args.check,
+    }
+
+    
+    # Commented out to check in .
+    #print(f"[ppt_builder] Total parsed items: {len(items)} from {len(inputs)} input file(s)")
 
     
     build(
