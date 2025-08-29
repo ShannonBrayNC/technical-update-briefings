@@ -137,7 +137,7 @@ def _first_a_by_text(parent: Any, needle: str) -> Optional[BsTag]:
         return None
     needle_l = needle.lower()
     # cast to help Pylance understand items are BsTag, not PageElement
-    for a_tag in cast(List[BsTag], parent.find_all("a")):
+    for a_tag in cast(List[Tag], parent.find_all("a")):
         if _txt(a_tag).lower().find(needle_l) != -1:
             return a_tag
     return None
@@ -190,7 +190,7 @@ def parse_roadmap_html(path: str) -> List[Item]:
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         soup = BeautifulSoup(f.read(), "lxml")
 
-    rows: List[BsTag] = []
+    rows: List[Tag] = []
     # Try table rows
     rows.extend(soup.select("table tr"))
     # Try card-like blocks
@@ -797,8 +797,10 @@ def parse_message_center_html(html_path: str, month: str | None = None) -> list[
     - Adapts to your Item dataclass signature at runtime (no breaking changes).
     """
     # Local imports to avoid global churn
-    from bs4 import BeautifulSoup, BsTag  # type: ignore[import]
-    from bs4.element import NavigableString
+    from bs4 import BeautifulSoup
+    from bs4.element import Tag, NavigableString
+    import re
+    from pathlib import Path
     import re
     import inspect
     from pathlib import Path
