@@ -16,11 +16,14 @@ import argparse
 import datetime as dt
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
+from typing import Any, Dict, Iterable, List, Optional, Tuple, cast, Union 
 import traceback  # only if you log tracebacks; harmless otherwise
 from bs4 import BeautifulSoup
-from bs4.element import Tag, NavigableString
+from bs4.element import BsTag, NavigableString, PageElement
 import re
+
+
+SoupEl = Union[BsTag, NavigableString, PageElement, str]
 
 # python-pptx
 import pptx
@@ -69,62 +72,79 @@ def _clean(s: Any) -> str:
     return str(s).strip()
 
 def _txt(x: Any) -> str:
+    """Return visible text from a bs4 node (Tag/PageElement/NavigableString/str/None)."""
     if x is None:
         return ""
-    if isinstance(x, NavigableString):
+    try:
+        # bs4 Tag/PageElement/NavigableString
+        if hasattr(x, "get_text"):
+            return x.get_text(" ", strip=True)  # type: ignore[attr-defined]
+        # already a string
+        if isinstance(x, str):
+            return x.strip()
+        # last resort
         return str(x).strip()
-    if isinstance(x, Tag):
-        return x.get_text(strip=True)
-    return str(x).strip()
+    except Exception:
+        return str(x).strip() if x is not None else ""
+
 
 def _txt_or_none(x: Any) -> Optional[str]:
-    t = _txt(x)
-    return t if t else None
+    s = _txt(x)
+    return s if s else None
+
 
 
 def _href(a: Any) -> str:
     """Return anchor href safely for Pylance/static typing."""
-    if isinstance(a, Tag) and a.has_attr("href"):
+    if isinstance(a, BsTag) and a.has_attr("href"):
         v = a.get("href")  # returns str | list[str] | None at runtime
         return v if isinstance(v, str) else ""
     return ""
 
 
 
-
-def safe_find_all(node: Any, name=None, **kwargs) -> List[Tag]:
-    if isinstance(node, Tag):
-        return [t for t in node.find_all(name, **kwargs) if isinstance(t, Tag)]
+def _safe_find_all(node: Any, name: Any = True, **kwargs) -> list[PageElement]:
+    if hasattr(node, "find_all"):
+        return node.find_all(name, **kwargs)  # type: ignore[no-any-return]
     return []
 
-def safe_find(node: Any, name=None, **kwargs) -> Optional[Tag]:
-    if isinstance(node, Tag):
-        el = node.find(name, **kwargs)
-        return el if isinstance(el, Tag) else None
+def _safe_select_one(node: Any, selector: str) -> Any:
+    if hasattr(node, "select_one"):
+        return node.select_one(selector)
     return None
 
+def _safe_find(node: Any, name=None, **kwargs) -> Optional[BsTag]:
+    if isinstance(node, BsTag):
+        el = node.find(name, **kwargs)
+        return el if isinstance(el, BsTag) else None
+    return None
 
-def _first_tag(parent: Any, name: str, **kwargs: Any) -> Optional[Tag]:
+# Back-compat (optional)
+safe_find_all = _safe_find_all
+safe_find = _safe_find
+
+
+def _first_tag(parent: Any, name: str, **kwargs: Any) -> Optional[BsTag]:
     """Return first child Tag (never a PageElement placeholder)."""
-    if not isinstance(parent, Tag):
+    if not isinstance(parent, BsTag):
         return None
     found = parent.find(name, **kwargs)
-    return found if isinstance(found, Tag) else None
+    return found if isinstance(found, BsTag) else None
 
-def _first_a_by_text(parent: Any, needle: str) -> Optional[Tag]:
+def _first_a_by_text(parent: Any, needle: str) -> Optional[BsTag]:
     """First <a> whose text contains needle (case-insensitive)."""
-    if not isinstance(parent, Tag):
+    if not isinstance(parent, BsTag):
         return None
     needle_l = needle.lower()
-    # cast to help Pylance understand items are Tag, not PageElement
-    for a_tag in cast(List[Tag], parent.find_all("a")):
+    # cast to help Pylance understand items are BsTag, not PageElement
+    for a_tag in cast(List[BsTag], parent.find_all("a")):
         if _txt(a_tag).lower().find(needle_l) != -1:
             return a_tag
     return None
 
 def _attr(tag: Any, name: str) -> Optional[str]:
     """Safe attribute access that returns a cleaned string or None."""
-    if isinstance(tag, Tag):
+    if isinstance(tag, BsTag):
         val = tag.get(name)  # bs4-safe
         if val is None:
             return None
@@ -170,7 +190,7 @@ def parse_roadmap_html(path: str) -> List[Item]:
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         soup = BeautifulSoup(f.read(), "lxml")
 
-    rows: List[Tag] = []
+    rows: List[BsTag] = []
     # Try table rows
     rows.extend(soup.select("table tr"))
     # Try card-like blocks
@@ -194,7 +214,7 @@ def parse_roadmap_html(path: str) -> List[Item]:
         # Roadmap ID – look for an <a> or a text like "ID: MC123456 / RM123456"
         rid = ""
         # try anchor with "roadmap" or "mc" in href
-        for a in cast(List[Tag], row.find_all("a")):
+        for a in cast(List[BsTag], row.find_all("a")):
             href = _attr(a, "href")
             if href and ("roadmap" in href.lower() or "messagecenter" in href.lower() or "mc" in href.lower()):
                 # often the anchor text is the ID too
@@ -210,8 +230,8 @@ def parse_roadmap_html(path: str) -> List[Item]:
 
         # URL – prefer first anchor that looks like roadmap/message center
         url = ""
-        a_pref: Optional[Tag] = None
-        for a in cast(List[Tag], row.find_all("a")):
+        a_pref: Optional[BsTag] = None
+        for a in cast(List[BsTag], row.find_all("a")):
             href = _attr(a, "href")
             if href and ("microsoft.com" in href.lower() or "roadmap" in href.lower() or "messagecenter" in href.lower()):
                 a_pref = a
@@ -267,7 +287,7 @@ def parse_roadmap_html(path: str) -> List[Item]:
 
         # If there are csv-like meta fields
         meta = row.select_one(".meta, .details, .properties")
-        if isinstance(meta, Tag):
+        if isinstance(meta, BsTag):
             products = products or _split_csv(_txt_or_none(meta.find(attrs={"data-key": "products"}) or "") or "")
             platforms = platforms or _split_csv(_txt_or_none(meta.find(attrs={"data-key": "platforms"}) or "") or "")
             audience = audience or _split_csv(_txt_or_none(meta.find(attrs={"data-key": "audience"}) or "") or "")
@@ -600,7 +620,7 @@ def parse_inputs(inputs: list[str], debug: bool = False):
 def _tx(x: Any) -> str:
     if x is None:
         return ""
-    if isinstance(x, (Tag, NavigableString)):
+    if isinstance(x, (BsTag, NavigableString)):
         return x.get_text(strip=True)
     return str(x).strip()
 
@@ -620,7 +640,7 @@ def _csv_list(s: str) -> List[str]:
             out.append(p)
     return out
 
-def _first_roadmap_link(container: Tag) -> str:
+def _first_roadmap_link(container: BsTag) -> str:
     # Prefer official roadmap links if present
     for a in container.find_all("a", href=True):
         href = _href(a)
@@ -656,19 +676,19 @@ def _normalize_label(s: str) -> str:
 
 # --- table-style parser -------------------------------------------------------
 
-def _parse_mc_table(table: Tag) -> List[Item]:
+def _parse_mc_table(table: BsTag) -> List[Item]:
     items: List[Item] = []
     headers: List[str] = []
     # collect headers
     thead = table.find("thead")
-    if isinstance(thead, Tag):
+    if isinstance(thead, BsTag):
         ths = thead.find_all("th")
         if ths:
             headers = [_normalize_label(_tx(th)) for th in ths]
     if not headers:
         # try first row as header
         first_tr = table.find("tr")
-        if isinstance(first_tr, Tag):
+        if isinstance(first_tr, BsTag):
             ths = first_tr.find_all(["th", "td"])
             headers = [_normalize_label(_tx(th)) for th in ths]
 
@@ -694,14 +714,15 @@ def _parse_mc_table(table: Tag) -> List[Item]:
     idx_date      = col_index(["date", "month", "published", "created", "modified"])
 
     # iterate rows
-    for tr in safe_find_all(table, "tr"):
-        tds: List[Tag] = safe_find_all(tr, "td")
+    for tr in _safe_find_all(table, "tr"):
+        tds = _safe_find_all(tr, "td")
         if not tds:
             continue
 
-            # safe access helper: returns text of cell or default
-            def cell(i: Optional[int], default: str = "") -> str:
-                return _txt(tds[i]) if (i is not None and 0 <= i < len(tds)) else default
+        def cell(i: Optional[int]) -> str:
+            if i is None or i < 0 or i >= len(tds):
+                return ""
+            return _txt(tds[i])  # <- not _tx, and make sure _txt(x: Any) exists
 
             # ---- example extraction (adjust column indexes to your header map) ----
             title     = cell(0)
@@ -734,7 +755,7 @@ def _parse_mc_table(table: Tag) -> List[Item]:
 
 # --- card/list-style parser ---------------------------------------------------
 
-def _parse_mc_cards(root: Tag) -> List[Item]:
+def _parse_mc_cards(root: BsTag) -> List[Item]:
     items: List[Item] = []
     # Example: fall back to tables if no card containers found
     for tbl in safe_find_all(root, "table"):
@@ -765,55 +786,289 @@ def _parse_mc_cards(root: Tag) -> List[Item]:
 
 # --- public entry -------------------------------------------------------------
 
-def parse_message_center_html(html: str) -> List[Item]:
+
+def parse_message_center_html(html_path: str, month: str | None = None) -> list[Item]:
     """
-    Parse Message Center supplemental HTML into a list[Item].
-    Supports both table-based and card/list-based exports.
+    Parse card-based Message Center export HTML into a list[Item].
+
+    - Works with card UIs (divs with class containing 'card' or 'ms-').
+    - Extracts: rid/roadmap_id, title, description/summary, url, status,
+      products, platforms, audience, phases, clouds; plus created/modified/ga when present.
+    - Adapts to your Item dataclass signature at runtime (no breaking changes).
     """
-    soup = BeautifulSoup(html or "", "lxml")
-    if not soup or not soup.find(True):
-        return []
+    # Local imports to avoid global churn
+    from bs4 import BeautifulSoup, BsTag  # type: ignore[import]
+    from bs4.element import NavigableString
+    import re
+    import inspect
+    from pathlib import Path
 
-    items: List[Item] = []
+    # ---------- small helpers ----------
+    def _txt(x: BsTag | NavigableString | None) -> str:
+        if x is None:
+            return ""
+        try:
+            return x.get_text(" ", strip=True)
+        except Exception:
+            return str(x).strip()
 
-    # 1) Prefer table exports if we can detect header hints
-    best_table: Optional[Tag] = None
-    best_score = 0
-    for tbl in soup.find_all("table"):
-        if not isinstance(tbl, Tag):
-            continue
-        # score table by presence of expected headers
-        heads = [ _normalize_label(_tx(th)) for th in tbl.find_all("th") ]
-        score = sum(1 for h in heads if any(k in h for k in [
-            "title","subject","summary","description","roadmap id","id","status","product","platform","audience","date","month","created","modified"
-        ]))
-        if score > best_score:
-            best_score = score
-            best_table = tbl
+    def _first(sel: BsTag, css: str) -> BsTag | None:
+        # minimal CSS-ish: only tag names and [attr] and .class
+        try:
+            found = sel.select_one(css)  # bs4 supports select_one when soup is built with lxml
+            return found  # type: ignore[return-value]
+        except Exception:
+            return None
 
-    if best_table is not None and best_score >= 2:
-        items.extend(_parse_mc_table(best_table))
+    def _find_url(card: BsTag) -> str:
+        # any anchor with href that looks like a roadmap feature link
+        for a in card.find_all("a", href=True):
+            href = a.get("href") if hasattr(a, "get") else None
+            if isinstance(href, str) and re.search(r"(featureid=|\broadmap\b|\bmicrosoft-365-roadmap\b)", href, re.I):
+                return href
+            # fallback: first anchor
+            a0 = card.find("a", href=True)
+            href = a0.get("href") if hasattr(a0, "get") else None # type: ignore[index]
+        return href if isinstance(href, str) else ""
+    # ---------- main logic ----
 
-    # 2) Also scan for card/list style containers anywhere in the doc
-    items.extend(_parse_mc_cards(soup))
 
-    # 3) Deduplicate by (roadmap_id, title, url)
-    def _key(it: Item) -> tuple[str, str, str]:
+
+    def _find_title(card: BsTag) -> str:
+        # headings or role=heading
+        for sel in ("h1, h2, h3, h4", "[role=heading]"):
+            h = _first(card, sel)
+            if h:
+                t = _txt(h)
+                if t:
+                    return t
+        # badge or strong text as fallback
+        b = _first(card, "strong") or _first(card, ".ms-Text")
+        return _txt(b)
+
+    def _longest_para(card: BsTag) -> str:
+        paras = [p for p in card.find_all(["p", "div", "span"]) if _txt(p)]
+        if not paras:
+            return _txt(card)
+        paras.sort(key=lambda p: len(_txt(p)), reverse=True)
+        return _txt(paras[0])
+
+    def _find_rid(card: BsTag) -> str:
+        # Look for numeric ID in common patterns
+        text = _txt(card)
+        m = re.search(r"\b(?:Feature\s*ID|Roadmap\s*ID|ID)\s*[:#]?\s*([0-9]{3,8})\b", text, re.I)
+        if m:
+            return m.group(1)
+        # Sometimes in URL
+        url = _find_url(card)
+        m = re.search(r"(?:featureid|features?)/?[:=]?(\d{3,8})", url, re.I)
+        return m.group(1) if m else ""
+
+    _PRODUCT_WORDS = [
+        "Microsoft Teams", "Teams", "SharePoint", "Exchange", "Outlook",
+        "OneDrive", "Planner", "Loop", "Viva", "Entra", "Defender",
+        "Purview", "Copilot", "Microsoft 365", "Office", "Whiteboard",
+        "Yammer", "Viva Engage", "Stream", "Forms", "PowerPoint Live",
+    ]
+
+    def _guess_products(text: str) -> list[str]:
+        hits = []
+        for w in _PRODUCT_WORDS:
+            if re.search(rf"\b{re.escape(w)}\b", text, re.I):
+                hits.append(w)
+        # de-dup but preserve order
+        seen = set()
+        out: list[str] = []
+        for w in hits:
+            k = w.lower()
+            if k not in seen:
+                seen.add(k)
+                out.append(w)
+        return out or ["Microsoft 365"]
+
+    _PLATFORMS = ["Web", "Windows", "Mac", "iOS", "Android", "GCC", "GCC High", "DoD", "Worldwide", "Targeted Release"]
+
+    def _guess_platforms(text: str) -> list[str]:
+        hits = []
+        for p in _PLATFORMS:
+            if re.search(rf"\b{re.escape(p)}\b", text, re.I):
+                hits.append(p)
+        # squash to a sane set
+        seen = set()
+        out: list[str] = []
+        for p in hits:
+            k = p.lower()
+            if k not in seen:
+                seen.add(k)
+                out.append(p)
+        return out or ["Worldwide"]
+
+    def _guess_status(text: str) -> str:
+        if re.search(r"\b(rolling\s*out|rollout|launched|available)\b", text, re.I):
+            return "Rolling out"
+        if re.search(r"\b(in\s*development|working on)\b", text, re.I):
+            return "In development"
+        if re.search(r"\b(public|preview|private\s*preview)\b", text, re.I):
+            return "Preview"
+        if re.search(r"\b(deprecated|retired|remove)\b", text, re.I):
+            return "Retired"
+        return "Planned"
+
+    def _guess_audience(text: str) -> str:
+        if re.search(r"\b(Targeted Release)\b", text, re.I):
+            return "Targeted Release"
+        if re.search(r"\b(GCC High|DoD|GCC)\b", text, re.I):
+            return "Government"
+        return "Standard"
+
+    def _guess_dates(text: str) -> tuple[str | None, str | None, str | None]:
+        # created, modified, ga – loose; returns (created, modified, ga)
+        m_created = re.search(r"\bCreated[:\s]+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", text)
+        m_modified = re.search(r"\bModified[:\s]+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", text)
+        m_ga = re.search(r"\bGA[:\s]+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", text)
         return (
-            (it.roadmap_id or "").strip().lower(),
-            (it.title or "").strip().lower(),
-            (it.url or "").strip().lower(),
+            m_created.group(1) if m_created else None,
+            m_modified.group(1) if m_modified else None,
+            m_ga.group(1) if m_ga else None,
         )
-    seen: set[tuple[str, str, str]] = set()
-    uniq: List[Item] = []
-    for it in items:
-        k = _key(it)
-        if k in seen:
-            continue
-        seen.add(k)
-        uniq.append(it)
 
-    return uniq
+    def _phases(text: str) -> list[str]:
+        hits = []
+        for w in ["Preview", "Targeted Release", "Rolling out", "General Availability", "GA", "Retired"]:
+            if re.search(rf"\b{re.escape(w)}\b", text, re.I):
+                hits.append(w)
+        # dedup
+        seen = set()
+        out: list[str] = []
+        for w in hits:
+            k = w.lower()
+            if k not in seen:
+                seen.add(k)
+                out.append(w)
+        return out
+
+    def _clouds(text: str) -> list[str]:
+        hits = []
+        for w in ["Worldwide", "Commercial", "GCC", "GCC High", "DoD", "Education", "Sovereign"]:
+            if re.search(rf"\b{re.escape(w)}\b", text, re.I):
+                hits.append(w)
+        # dedup
+        seen = set()
+        out: list[str] = []
+        for w in hits:
+            k = w.lower()
+            if k not in seen:
+                seen.add(k)
+                out.append(w)
+        return out or ["Worldwide"]
+
+    # ---------- read + soup ----------
+    html = Path(html_path).read_text("utf-8", errors="ignore")
+    soup = BeautifulSoup(html, "lxml")
+
+    # find cards (what your probe showed you have)
+    def _is_card(el: BsTag) -> bool:
+        cls =  el.get("class") if hasattr(el, "get") else None
+        if not cls:
+            return False
+        joined = " ".join(cls)
+        return ("card" in joined) or joined.startswith("ms-") or "ms-" in joined
+
+    cards = [c for c in soup.find_all(True) if isinstance(c, BsTag) and _is_card(c)]
+
+    items: list[Item] = []
+
+    # Prepare runtime mapping to your Item signature
+    sig = inspect.signature(Item)  # type: ignore[name-defined]
+    params = [p for p in sig.parameters.keys() if p != "self"]
+
+    # Field name mapping (left = Item param, right = keys we’ll compute)
+    field_map: dict[str, list[str]] = {
+        "rid": ["rid", "roadmap_id", "id"],
+        "roadmap_id": ["roadmap_id", "rid", "id"],
+        "title": ["title"],
+        "summary": ["summary", "description"],
+        "description": ["description", "summary"],
+        "url": ["url"],
+        "month": ["month"],
+        "products": ["products", "product"],
+        "product": ["product"],
+        "platforms": ["platforms"],
+        "status": ["status"],
+        "audience": ["audience"],
+        "phases": ["phases"],
+        "clouds": ["clouds"],
+        "created": ["created"],
+        "modified": ["modified"],
+        "ga": ["ga"],
+    }
+
+    made = 0
+    for card in cards:
+        text = _txt(card)
+        if not text.strip():
+            continue
+
+        rid = _find_rid(card)
+        title = _find_title(card)
+        description = _longest_para(card)
+        url = _find_url(card)
+        status = _guess_status(text)
+        products = _guess_products(text if text else title)
+        platforms = _guess_platforms(text)
+        audience = _guess_audience(text)
+        created, modified, ga_date = _guess_dates(text)
+        phases = _phases(text)
+        clouds = _clouds(text)
+
+        # Build a common bag of values
+        bag: dict[str, object] = {
+            "rid": rid,
+            "roadmap_id": rid,
+            "title": title,
+            "summary": description,
+            "description": description,
+            "url": url,
+            "month": month or "",
+            "products": products,
+            "product": (products[0] if products else ""),
+            "platforms": platforms,
+            "status": status,
+            "audience": audience,
+            "phases": phases,
+            "clouds": clouds,
+            "created": created,
+            "modified": modified,
+            "ga": ga_date or None,
+        }
+
+        # Align with your Item signature
+        kwargs: dict[str, object] = {}
+        for p in params:
+            # pick first available alias for this parameter
+            choices = field_map.get(p, [p])
+            val = None
+            for k in choices:
+                if k in bag:
+                    val = bag[k]
+                    break
+            if val is None:
+                # Provide harmless defaults for unknown extras
+                val = "" if p not in ("products", "platforms", "phases", "clouds") else []
+            kwargs[p] = val
+
+        try:
+            items.append(Item(**kwargs))  # type: ignore[name-defined]
+            made += 1
+        except Exception as e:
+            # Don’t crash the build if a single card is odd; skip with minimal visibility
+            print(f"[parser] skip card (rid={rid!r}): {e}")
+
+    print(f"[parser] message-center: cards={len(cards)} -> items={made}")
+    return items
+
+
+
 
 
 def _assets_dict_from_args(args: argparse.Namespace) -> Dict[str, Optional[str]]:

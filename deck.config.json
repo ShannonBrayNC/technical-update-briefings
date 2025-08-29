@@ -1,0 +1,23 @@
+{
+  "Inputs": [
+    "..//roadmap//RoadmapPrimarySource.html",
+    "..//message_center//MessageCenterBriefingSuppliments.html"
+  ],
+  "Output": "C:/technical_update_briefings/RoadmapDeck_AutoGen.pptx",
+  "Month": "September 2025",
+  "CoverTitle": "M365 Technical Update Briefing",
+  "CoverDates": "September 2025",
+  "SeparatorTitle": "Technical Update Briefing — September 2025",
+  "Cover": ".//assets//cover.png",
+  "AgendaBg": ".//assets//agenda.png",
+  "Separator": ".//assets//separator.png",
+  "ConclusionBg": ".//assets//conclusion.png",
+  "ThankYou": ".//assets//thankyou.png",
+  "BrandBg": ".//assets//brand_bg.png",
+  "Logo": ".//assets//parex-logo.png",
+  "Logo2": ".//assets//customer-logo.png",
+  "Rocket": ".//assets//rocket.png",
+  "Magnifier": ".//assets//magnifier.png",
+  "Template": "",
+  "RailWidth": 3.5
+}

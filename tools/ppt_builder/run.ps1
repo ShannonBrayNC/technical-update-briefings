@@ -1,296 +1,146 @@
-<# =====================================================================
-   run.ps1  —  M365 Roadmap Deck runner
-   - Reads deck.config.json (or accepts overrides)
-   - Resolves paths relative to the JSON file’s folder (fallbacks provided)
-   - Calls the venv python to run generate_deck.py with correct args
-   - Verbose logging shows exactly which inputs/assets are used
-   ===================================================================== #>
-
+# tools/ppt_builder/run.ps1
 [CmdletBinding()]
 param(
-  # Optional JSON config (recommended). Example: tools\ppt_builder\deck.config.json
-  [string]$Config,
-
-  # Optional overrides (take precedence over JSON):
-  [string[]]$Inputs,
-  [string]$Output,
-  [string]$Month,
-  [string]$CoverTitle,
-  [string]$CoverDates,
-  [string]$SeparatorTitle,
-  [string]$Cover,
-  [string]$AgendaBg,
-  [string]$Separator,
-  [string]$ConclusionBg,
-  [string]$ThankYou,
-  [string]$BrandBg,
-  [string]$Logo,
-  [string]$Logo2,
-  [string]$Rocket,
-  [string]$Magnifier,
-  [string]$Template,
-  [double]$RailWidth = 3.5,
-
-  # Advanced
-  [switch]$DryRun   # Just print the computed command; do not execute
+  [string]$Config = "$PSScriptRoot\deck.config.json",
+  [switch]$NoVenv,
+  [switch]$NoPip,
+  [switch]$WhatIf
 )
 
-# --- Constants & Script Roots -------------------------------------------------
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-$script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script:RepoRoot  = Split-Path -Parent (Split-Path -Parent $script:ScriptDir)  # ...\tools
-if (-not (Test-Path $script:RepoRoot)) { $script:RepoRoot = (Get-Location).Path }
-
-$script:ConfigDir = $script:ScriptDir   # default; updated below if -Config supplied
-
-# Try to use venv python in this folder; fallback to py -3.12
-$script:VenvPython = Join-Path $script:ScriptDir ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $script:VenvPython)) {
-  # fallback: system launcher
-  $script:VenvPython = "py"
+function Resolve-From($baseDir, $p) {
+  if ([string]::IsNullOrWhiteSpace($p)) { return $null }
+  if ([System.IO.Path]::IsPathRooted($p)) { return $p }
+  return (Join-Path -Path $baseDir -ChildPath $p)
 }
 
-$script:GeneratePy = Join-Path $script:ScriptDir "generate_deck.py"
-
-# --- Helpers ------------------------------------------------------------------
-
-function Write-Header([string]$Text) {
-  Write-Host ""
-  Write-Host "=== $Text ===" -ForegroundColor Cyan
-}
-
-function _Read-Json([string]$Path) {
-  try {
-    if (-not (Test-Path -LiteralPath $Path)) { return $null }
-    $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
-    return $raw | ConvertFrom-Json -AsHashtable
-  } catch {
-    Write-Warning "Failed to read JSON '$Path' : $($_.Exception.Message)"
-    return $null
+function Must-Exist($label, $path, [switch]$Optional) {
+  if ([string]::IsNullOrWhiteSpace($path)) {
+    if ($Optional) { return $null }
+    throw "Missing $label path."
   }
-}
-
-function _Resolve-PathOrNull {
-  param(
-    [Parameter(Mandatory)][string]$PathLike,
-    [string]$BaseDir = $null
-  )
-  try {
-    if ([System.IO.Path]::IsPathRooted($PathLike)) {
-      return (Test-Path -LiteralPath $PathLike) ? (Resolve-Path -LiteralPath $PathLike).Path : $null
+  if (-not (Test-Path -LiteralPath $path)) {
+    if ($Optional) {
+      Write-Verbose "Optional $label not found: $path"
+      return $null
     }
-
-    $candidates = @()
-
-    if ($BaseDir)                     { $candidates += (Join-Path -Path $BaseDir -ChildPath $PathLike) }
-    if ($script:RepoRoot)             { $candidates += (Join-Path -Path $script:RepoRoot -ChildPath $PathLike) }
-    if ($script:ScriptDir)            { $candidates += (Join-Path -Path $script:ScriptDir -ChildPath $PathLike) }
-    $candidates += (Join-Path -Path (Get-Location).Path -ChildPath $PathLike)
-
-    foreach ($c in $candidates) {
-      if (Test-Path -LiteralPath $c) { return (Resolve-Path -LiteralPath $c).Path }
-    }
-    return $null
-  } catch { return $null }
+    throw "$label not found: $path"
+  }
+  return (Resolve-Path -LiteralPath $path).Path
 }
 
-function _Pick([hashtable]$Cfg, [string]$Key, [object]$Override) {
-  if ($PSBoundParameters.ContainsKey($Key) -and $null -ne $Override -and ($Override -ne "")) { return $Override }
-  if ($Cfg -and $Cfg.ContainsKey($Key) -and $null -ne $Cfg[$Key] -and ($Cfg[$Key] -ne ""))   { return $Cfg[$Key] }
-  return $null
+# 1) Load config (as hashtable so we can check keys safely)
+if (-not (Test-Path -LiteralPath $Config)) { throw "Config file not found: $Config" }
+$ConfigPath = (Resolve-Path -LiteralPath $Config).Path
+$ConfigDir  = Split-Path -Parent $ConfigPath
+$cfg = (Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json -AsHashtable)
+
+# 2) Resolve and validate inputs/output relative to the config location
+$inputs = @()
+foreach ($raw in @($cfg.Inputs)) {
+  $abs = Resolve-From $ConfigDir $raw
+  $inputs += (Must-Exist "Input" $abs)
 }
+if ($inputs.Count -eq 0) { throw "No Inputs provided in config." }
 
-# Returns array of "--FLAG", "value" pairs for a single asset path
-function _AssetFlag([string]$Flag, [string]$PathLike, [string]$BaseDir) {
-  if (-not $PathLike) { return @() }
-  $resolved = _Resolve-PathOrNull -PathLike $PathLike -BaseDir $BaseDir
-  if ($resolved) { return @("--$Flag", $resolved) }
-  Write-Warning "Asset not found for --$Flag : $PathLike  (base '$BaseDir')"
-  return @()
-}
+$output = Resolve-From $ConfigDir $cfg.Output
+if ([string]::IsNullOrWhiteSpace($output)) { throw "Output not provided in config." }
+$null = New-Item -Path (Split-Path -Parent $output) -ItemType Directory -Force -ErrorAction SilentlyContinue
 
-function _Ensure-OutputPath([string]$PathLike, [string]$BaseDir) {
-  $candidate = if ($PathLike) { $PathLike } else { "RoadmapDeck_AutoGen.pptx" }
-  $full = _Resolve-PathOrNull -PathLike $candidate -BaseDir $BaseDir
-  if (-not $full) {
-    # If the parent exists, build a full path there; else put in current folder
-    $parent = Split-Path -Parent (Join-Path -Path $BaseDir -ChildPath $candidate)
-    if (-not (Test-Path -LiteralPath $parent)) { $parent = (Get-Location).Path }
-    $full = Join-Path -Path $parent -ChildPath (Split-Path -Leaf $candidate)
-  }
-  return $full
-}
+# 3) Optional assets & strings
+$cover        = Must-Exist "Cover"        (Resolve-From $ConfigDir $cfg.Cover)        -Optional
+$agendaBg     = Must-Exist "AgendaBg"     (Resolve-From $ConfigDir $cfg.AgendaBg)     -Optional
+$separator    = Must-Exist "Separator"    (Resolve-From $ConfigDir $cfg.Separator)    -Optional
+$conclusionBg = Must-Exist "ConclusionBg" (Resolve-From $ConfigDir $cfg.ConclusionBg) -Optional
+$thankyou     = Must-Exist "ThankYou"     (Resolve-From $ConfigDir $cfg.ThankYou)     -Optional
+$brandBg      = Must-Exist "BrandBg"      (Resolve-From $ConfigDir $cfg.BrandBg)      -Optional
+$logo         = Must-Exist "Logo"         (Resolve-From $ConfigDir $cfg.Logo)         -Optional
+$logo2        = Must-Exist "Logo2"        (Resolve-From $ConfigDir $cfg.Logo2)        -Optional
+$rocket       = Must-Exist "Rocket"       (Resolve-From $ConfigDir $cfg.Rocket)       -Optional
+$magnifier    = Must-Exist "Magnifier"    (Resolve-From $ConfigDir $cfg.Magnifier)    -Optional
+$template     = Must-Exist "Template"     (Resolve-From $ConfigDir $cfg.Template)     -Optional
 
-function _Build-Argv {
-  param(
-    [hashtable]$Cfg
-  )
+$month         = [string]$cfg.Month
+$coverTitle    = [string]$cfg.CoverTitle
+$coverDates    = [string]$cfg.CoverDates
+$separatorTitle= [string]$cfg.SeparatorTitle
+$railWidth     = if ($cfg.RailWidth) { [string]$cfg.RailWidth } else { $null }
 
-  # Resolve Inputs relative to the config directory
-  $inputsRaw = @()
-  if ($PSBoundParameters.ContainsKey('Inputs') -and $Inputs) { $inputsRaw = @($Inputs) }
-  elseif ($Cfg -and $Cfg.ContainsKey('Inputs')) { $inputsRaw = @($Cfg.Inputs) }
+# 4) Python selection + venv bootstrap
+$scriptDir  = $PSScriptRoot
+$venvPy     = Join-Path $scriptDir ".venv\Scripts\python.exe"
+$python     = $null
 
-  $inputsResolved = @()
-  foreach ($raw in $inputsRaw) {
-    if (-not $raw) { continue }
-    $p = _Resolve-PathOrNull -PathLike $raw -BaseDir $script:ConfigDir
-    if ($p) { $inputsResolved += $p } else { Write-Warning "Input not found: $raw  (base '$($script:ConfigDir)')" }
-  }
-
-  if ($inputsResolved.Count -eq 0) {
-    Write-Warning "No valid input files resolved — the deck will only contain shell slides."
-  }
-
-  # Output path
-  $outWanted = _Pick $Cfg 'Output' $Output
-  $outFull   = _Ensure-OutputPath -PathLike $outWanted -BaseDir $script:ConfigDir
-
-  # Prevent ‘file in use’ errors: if cannot open for write, add timestamp
-  try {
-    $fs = [System.IO.File]::Open($outFull, 'OpenOrCreate', 'ReadWrite', 'None')
-    $fs.Close()
-  } catch {
-    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $leaf  = [System.IO.Path]::GetFileNameWithoutExtension($outFull)
-    $ext   = [System.IO.Path]::GetExtension($outFull)
-    $dir   = Split-Path -Parent $outFull
-    $alt   = Join-Path $dir "$leaf`_$stamp$ext"
-    Write-Warning "Output appears locked. Writing to: $alt"
-    $outFull = $alt
-  }
-
-  $argv = @()
-
-  if ($inputsResolved.Count -gt 0) {
-    $argv += '-i'
-    $argv += $inputsResolved
-  }
-
-  $argv += @('-o', $outFull)
-
-  # Simple scalar flags
-  $scalars = @(
-    @{ key='Month';          flag='--month' },
-    @{ key='CoverTitle';     flag='--cover-title' },
-    @{ key='CoverDates';     flag='--cover-dates' },
-    @{ key='SeparatorTitle'; flag='--separator-title' },
-    @{ key='Template';       flag='--template' }
-  )
-
-  foreach ($m in $scalars) {
-    $val = _Pick $Cfg $m.key (Get-Variable -Name $m.key -ValueOnly -ErrorAction SilentlyContinue)
-    if ($val) { $argv += @($m.flag, $val) }
-  }
-
-  # Numeric rail width
-  $rw = $RailWidth
-  if (-not $PSBoundParameters.ContainsKey('RailWidth') -and $Cfg -and $Cfg.ContainsKey('RailWidth')) {
-    $rw = [double]$Cfg['RailWidth']
-  }
-  if ($rw -gt 0) { $argv += @('--rail-width', "$rw") }
-
-  # Asset flags (each is a single path)
-  $assetPairs = @(
-    @{ flag='cover';         key='Cover' },
-    @{ flag='agenda-bg';     key='AgendaBg' },
-    @{ flag='separator';     key='Separator' },
-    @{ flag='conclusion-bg'; key='ConclusionBg' },
-    @{ flag='thankyou';      key='ThankYou' },
-    @{ flag='brand-bg';      key='BrandBg' },
-    @{ flag='logo';          key='Logo' },
-    @{ flag='logo2';         key='Logo2' },
-    @{ flag='rocket';        key='Rocket' },
-    @{ flag='magnifier';     key='Magnifier' }
-  )
-
-  foreach ($ap in $assetPairs) {
-    $val = _Pick $Cfg $ap.key (Get-Variable -Name $ap.key -ValueOnly -ErrorAction SilentlyContinue)
-    if ($val) {
-      $argv += (_AssetFlag -Flag $ap.flag -PathLike $val -BaseDir $script:ConfigDir)
-    }
-  }
-
-  # Final log
-  Write-Header "Resolved Inputs"
-  if ($inputsResolved.Count -gt 0) { $inputsResolved | ForEach-Object { Write-Host "  - $_" } }
-  else { Write-Host "  (none)" }
-
-  Write-Header "Output"
-  Write-Host "  $outFull"
-
-  Write-Header "Command Preview"
-  $preview = @($script:VenvPython, $script:GeneratePy) + $argv
-  Write-Host "  $($preview -join ' ')"
-
-  return $argv
-}
-
-function _Ensure-Deps {
-  # Only if we found a real Python exe (not the py launcher).
-  $isRealExe = ($script:VenvPython -ne 'py' -and (Test-Path -LiteralPath $script:VenvPython))
-  if (-not $isRealExe) {
-    Write-Verbose "Using 'py' launcher; assuming dependencies are available."
-    return
-  }
-
-  & $script:VenvPython -m pip install --upgrade pip *> $null
-  & $script:VenvPython -m pip install python-pptx beautifulsoup4 lxml Pillow XlsxWriter *> $null
-}
-
-function Invoke-DeckBuilder([hashtable]$Cfg) {
-  if (-not (Test-Path -LiteralPath $script:GeneratePy)) {
-    throw "generate_deck.py not found at: $script:GeneratePy"
-  }
-  _Ensure-Deps
-
-  $argv = _Build-Argv -Cfg $Cfg
-
-  if ($DryRun) {
-    Write-Header "DryRun"
-    Write-Host "Skipping execution."
-    return
-  }
-
-  Write-Header "Running"
-  if ($script:VenvPython -eq 'py') {
-    # Use py -3.12 if available
-    & py -3.12 $script:GeneratePy @argv
-    if ($LASTEXITCODE -ne 0) {
-      Write-Warning "py -3.12 failed; retrying with 'py' default"
-      & py $script:GeneratePy @argv
-    }
-  } else {
-    & $script:VenvPython $script:GeneratePy @argv
-  }
-
-  if ($LASTEXITCODE -ne 0) {
-    throw "generate_deck.py exited with code $LASTEXITCODE"
-  }
-}
-
-# --- Main ---------------------------------------------------------------------
-
-Write-Header "Deck Runner"
-
-$cfg = $null
-if ($PSBoundParameters.ContainsKey('Config') -and $Config) {
-  $cfgPath = (Resolve-Path -LiteralPath $Config -ErrorAction SilentlyContinue)
-  if (-not $cfgPath) { throw "Config not found: $Config" }
-  $cfg = _Read-Json $cfgPath.Path
-  if (-not $cfg) { throw "Failed to read/parse JSON config: $($cfgPath.Path)" }
-  $script:ConfigDir = Split-Path -Parent $cfgPath.Path
-  Write-Verbose "Using config: $($cfgPath.Path)"
-  Write-Verbose "ConfigDir:    $script:ConfigDir"
+if (-not $NoVenv -and (Test-Path -LiteralPath $venvPy)) {
+  $python = $venvPy
 } else {
-  Write-Verbose "No config provided; using only parameter overrides."
-  $script:ConfigDir = $script:ScriptDir
+  $python = "python"
 }
 
-try {
-  Invoke-DeckBuilder -Cfg $cfg
-  Write-Host "`nDone." -ForegroundColor Green
-} catch {
-  Write-Error $_
-  exit 1
+Write-Verbose "Python => $python"
+if (-not $NoPip) {
+  try {
+    & $python -m pip --version | Out-Null
+  } catch {
+    Write-Warning "pip check failed; continuing"
+  }
 }
+
+# 5) Requirements (optional)
+$req = Join-Path $scriptDir "requirements.txt"
+if (-not $NoPip -and (Test-Path -LiteralPath $req)) {
+  Write-Host "Ensuring Python deps (requirements.txt)..." -ForegroundColor Cyan
+  & $python -m pip install -r $req
+}
+
+# 6) Build argument list for generate_deck.py
+$gen = (Must-Exist "generate_deck.py" (Join-Path $scriptDir "generate_deck.py"))
+$args = @($gen, "-i") + $inputs + @("-o", $output)
+
+function Add-Flag($name, $val) {
+  if ($null -ne $val -and $val -ne "") {
+    $script:args += @($name, $val)
+  }
+}
+Add-Flag "--month"          $month
+Add-Flag "--cover-title"    $coverTitle
+Add-Flag "--cover-dates"    $coverDates
+Add-Flag "--separator-title"$separatorTitle
+Add-Flag "--cover"          $cover
+Add-Flag "--agenda-bg"      $agendaBg
+Add-Flag "--separator"      $separator
+Add-Flag "--conclusion-bg"  $conclusionBg
+Add-Flag "--thankyou"       $thankyou
+Add-Flag "--brand-bg"       $brandBg
+Add-Flag "--logo"           $logo
+Add-Flag "--logo2"          $logo2
+Add-Flag "--rocket"         $rocket
+Add-Flag "--magnifier"      $magnifier
+Add-Flag "--template"       $template
+Add-Flag "--rail-width"     $railWidth
+
+# 7) Self-check
+Write-Host "=== Deck build self-check ===" -ForegroundColor Yellow
+"{0,-18} {1}" -f "Config:", $ConfigPath
+"{0,-18} {1}" -f "Inputs:", ($inputs -join "; ")
+"{0,-18} {1}" -f "Output:", $output
+"{0,-18} {1}" -f "Month:", $month
+"{0,-18} {1}" -f "Template:", ($template ?? "<none>")
+"{0,-18} {1}" -f "RailWidth:", ($railWidth ?? "<default>")
+"{0,-18} {1}" -f "Cover/Agenda:", (($cover ?? "<none>") + " / " + ($agendaBg ?? "<none>"))
+"{0,-18} {1}" -f "Separator:", ($separator ?? "<none>")
+"{0,-18} {1}" -f "Conclusion/Thanks:", (($conclusionBg ?? "<none>") + " / " + ($thankyou ?? "<none>"))
+"{0,-18} {1}" -f "Logos:", (($logo ?? "<none>") + " / " + ($logo2 ?? "<none>"))
+"{0,-18} {1}" -f "Icons:", (($rocket ?? "<none>") + " / " + ($magnifier ?? "<none>"))
+Write-Host "==============================`n"
+
+if ($WhatIf) {
+  Write-Host "[WhatIf] Would run:" -ForegroundColor DarkCyan
+  Write-Host ("`n{0} {1}`n" -f $python, ($args | ForEach-Object { '"{0}"' -f ($_ -replace '"','\"') }) -join ' ')
+  return
+}
+
+# 8) Run
+& $python @args
