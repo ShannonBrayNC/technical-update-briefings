@@ -1,0 +1,626 @@
+
+<#  M365.RoadmapStyled.psm1  (PowerShell 7+)
+    Clean, known-good rebuild.
+
+Exports:
+  Connect-GraphCertificate  - Graph plumbing (cert) placeholder
+  Get-M365ServiceMessages   - Placeholder (keeps surface for later merge)
+  Get-M365Roadmap           - Fetch, filter, render styled HTML
+
+Notes:
+  - Cloud normalization: Worldwide (Standard Multi-Tenant), GCC, GCC High, DoD
+  - "General Availability" in roadmap ~= Status "Launched"
+  - HTML has client-side filters + Apply + Month/Quarter toggle
+#>
+
+#region Utility helpers
+
+function Get-Prop {
+  param($Object,[string]$Name)
+  if ($null -eq $Object) { return $null }
+  ($Object.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1).Value
+}
+
+function Ensure-StringList {
+  param($Value)
+  $out = @()
+  if ($null -eq $Value) { return @() }
+  $seq = if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) { $Value } else { @($Value) }
+  foreach($v in $seq){
+    if ($null -eq $v) { continue }
+    if ($v -is [string]) { $s = $v.Trim(); if ($s) { $out += $s }; continue }
+    $cand = @('name','displayName','value','title','text','id') |
+      ForEach-Object { $p = $v.PSObject.Properties[$_]; if ($p) { [string]$p.Value } }
+    $s = ($cand | Where-Object { $_ -and $_.Trim() } | Select-Object -First 1)
+    if ($s) { $out += $s.Trim() }
+  }
+  ,$out
+}
+
+function Normalize-Cloud {
+  param([string]$Name)
+  if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
+  $n = $Name.Trim()
+  switch -Regex ($n.ToLowerInvariant()) {
+    '^(ww|worldwide|standard.*multi.*tenant|commercial)$' { 'Worldwide (Standard Multi-Tenant)'; break }
+    '^gcc$'                                              { 'GCC'; break }
+    '^(gcch|gcc[- ]?high|us gov(ernment)? high)$'        { 'GCC High'; break }
+    '^(dod|us.?do?d)$'                                   { 'DoD'; break }
+    default { $n }
+  }
+}
+
+function ConvertFrom-RoadmapMonth {
+  param([string]$Value)
+  # Examples: "September CY2025", "Aug CY2025"
+  if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+  $m = [regex]::Match($Value, '^\s*([A-Za-z]+)\s+CY(\d{4})\s*$')
+  if ($m.Success) {
+    try {
+      $monthName = $m.Groups[1].Value
+      $year = [int]$m.Groups[2].Value
+      $month = ([datetime]::ParseExact($monthName,'MMMM',$([System.Globalization.CultureInfo]::InvariantCulture))).Month
+      return [datetime]::new($year,$month,1)
+    } catch { return $null }
+  }
+  # Fallback: try normal Parse
+  try { return [datetime]::Parse($Value, [System.Globalization.CultureInfo]::InvariantCulture) } catch { return $null }
+}
+
+function Get-RoadmapArrays {
+  param([Parameter(Mandatory)][object]$Item)
+  $tc = Get-Prop $Item 'tagsContainer'
+  $products = @(); $clouds=@(); $phases=@(); $plats=@()
+
+  $p = if ($tc) { Get-Prop $tc 'products' } else { $null }
+  $products = Ensure-StringList $p
+
+  $c = if ($tc) { Get-Prop $tc 'cloudInstances' } else { $null }
+  $clouds = (Ensure-StringList $c) | ForEach-Object { Normalize-Cloud $_ }
+
+  $ph = if ($tc) { Get-Prop $tc 'releasePhases' } else { $null }
+  $phases = Ensure-StringList $ph
+
+  $pl = if ($tc) { Get-Prop $tc 'platforms' } else { $null }
+  $plats = Ensure-StringList $pl
+
+  [pscustomobject]@{
+    Products = $products
+    Clouds   = $clouds
+    Phases   = $phases
+    Platforms= $plats
+  }
+}
+
+#endregion Utility helpers
+
+#region Graph plumbing (placeholder)
+
+function Connect-GraphCertificate {
+  [CmdletBinding()]
+  param(
+    [string]$TenantId,
+    [string]$ClientId,
+    [string]$CertificateThumbprint,
+    [string]$GraphProfile = 'v1.0'
+  )
+  Write-Verbose "Connect-GraphCertificate placeholder. (Future: MSAL/Graph SDK connect here.)"
+}
+
+#endregion Graph
+
+#region Filtering & HTML
+
+function New-RoadmapHtml {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][object[]]$Items,
+    [string]$Title = 'Roadmap Briefing',
+    [string]$Subtitle = (Get-Date -Format 'yyyy-MM-dd'),
+    [ValidateSet('Cloud','Technology','None')] [string]$GroupBy = 'Cloud'
+  )
+
+  # Prepare JSON payload for client-side filtering
+  $rows = foreach($it in $Items){
+    $arr = Get-RoadmapArrays -Item $it
+    [pscustomobject]@{
+      id          = Get-Prop $it 'id'
+      title       = Get-Prop $it 'title'
+      description = Get-Prop $it 'description'
+      status      = (Get-Prop $it 'status')
+      products    = $arr.Products
+      platforms   = $arr.Platforms
+      clouds      = $arr.Clouds
+      phases      = $arr.Phases
+      createdRaw  = Get-Prop $it 'created'
+      modifiedRaw = Get-Prop $it 'modified'
+      link        = (Get-Prop $it 'link')
+    }
+  }
+
+  $json = $rows | ConvertTo-Json -Depth 5
+
+  $css = @'
+:root{
+  --bg:#0b1220; --card:#121a2b; --ink:#e7ecf6; --muted:#9fb1d1;
+  --accent:#7aa2ff; --chip:#1e2a44; --ok:#2ecc71; --warn:#f1c40f; --err:#e74c3c;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Segoe UI Variable',sans-serif;background:var(--bg);color:var(--ink)}
+.container{display:grid;grid-template-columns:320px 1fr;gap:16px;min-height:100vh}
+aside{background:var(--card);padding:16px;position:sticky;top:0;height:100vh;overflow:auto;border-right:1px solid #1d2740}
+main{padding:16px}
+h1{margin:0 0 4px 0;font-weight:700;font-size:22px}
+h2{margin:16px 0 8px 0;font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+label{display:block;margin:6px 0;font-size:14px}
+fieldset{border:none;padding:0;margin:0 0 8px 0}
+.button{background:var(--accent);border:none;color:#00163b;padding:10px 14px;font-weight:700;border-radius:10px;cursor:pointer;margin-top:8px}
+.chip{display:inline-block;background:var(--chip);padding:4px 8px;border-radius:999px;font-size:12px;margin-right:6px;margin-top:6px;color:var(--muted)}
+.card{background:var(--card);border:1px solid #1d2740;border-radius:16px;padding:14px;margin:10px 0}
+.group{margin:22px 0}
+.group h3{margin:10px 0 6px 0;font-size:16px;border-bottom:1px solid #1d2740;padding-bottom:6px}
+a{color:var(--accent);text-decoration:none}
+.empty{color:var(--muted);padding:20px;border:1px dashed #1d2740;border-radius:12px;background:#0c162b}
+small{color:var(--muted)}
+.switch{display:flex;gap:10px;align-items:center;margin-top:8px}
+hr{border:none;border-top:1px solid #1d2740;margin:12px 0}
+.hidden{display:none !important}
+'@
+
+  $js = @'
+const DATA = __DATA__;
+
+const CLOUD_EMOJI = {
+  "Worldwide (Standard Multi-Tenant)": "🌐",
+  "GCC": "🏛️",
+  "GCC High": "🏛️✨",
+  "DoD": "🛡️"
+};
+
+function uniq(arr){ return [...new Set(arr.filter(Boolean))]; }
+
+function computeFacets(items){
+  const clouds = uniq(items.flatMap(x=>x.clouds||[]));
+  const tech   = uniq(items.flatMap(x=>x.products||[])).sort();
+  const plats  = uniq(items.flatMap(x=>x.platforms||[])).sort();
+  const status = uniq(items.map(x=>(x.status||'').toString())).sort();
+  return {clouds,tech,plats,status};
+}
+
+function monthKey(s){
+  // Expect "September CY2025" etc.
+  if(!s) return null;
+  const m = String(s).match(/^\s*([A-Za-z]+)\s+CY(\d{4})\s*$/);
+  if(!m) return null;
+  const month = new Date(`${m[1]} 1, ${m[2]}`);
+  if(isNaN(month)) return null;
+  const mm = String(month.getMonth()+1).padStart(2,'0');
+  return `${month.getFullYear()}-${mm}`; // yyyy-mm
+}
+
+function quarterRangeFromYYYYMM(yyyy_mm){
+  if(!yyyy_mm) return null;
+  const [y,m] = yyyy_mm.split('-').map(Number);
+  const q = Math.floor((m-1)/3); // 0..3
+  const startMonth = q*3+1;
+  const endMonth = q*3+3;
+  const sm = String(startMonth).padStart(2,'0');
+  const em = String(endMonth).padStart(2,'0');
+  return { start:`${y}-${sm}`, end:`${y}-${em}` };
+}
+
+function initUI(items){
+  const facets = computeFacets(items);
+  const cloudBox = document.getElementById('clouds');
+  const techBox  = document.getElementById('tech');
+  const platBox  = document.getElementById('plats');
+  const statBox  = document.getElementById('status');
+
+  // Clouds
+  cloudBox.innerHTML = '';
+  facets.clouds.forEach(c => {
+    const id = `cloud_${c.replace(/\W+/g,'_')}`;
+    const label = document.createElement('label');
+    label.innerHTML = `<input type="checkbox" id="${id}" data-cloud="${c}" checked> ${CLOUD_EMOJI[c]||'☁️'} ${c}`;
+    cloudBox.appendChild(label);
+  });
+
+  // Tech
+  techBox.innerHTML='';
+  facets.tech.forEach(t => {
+    const id = `tech_${t.replace(/\W+/g,'_')}`;
+    const label = document.createElement('label');
+    label.innerHTML = `<input type="checkbox" id="${id}" data-tech="${t}"> ${t}`;
+    techBox.appendChild(label);
+  });
+
+  // Platforms
+  platBox.innerHTML='';
+  facets.plats.forEach(p => {
+    const id = `plat_${p.replace(/\W+/g,'_')}`;
+    const label = document.createElement('label');
+    label.innerHTML = `<input type="checkbox" id="${id}" data-plat="${p}"> ${p}`;
+    platBox.appendChild(label);
+  });
+
+  // Status
+  statBox.innerHTML='';
+  facets.status.forEach(s => {
+    const id = `stat_${s.replace(/\W+/g,'_')}`;
+    const label = document.createElement('label');
+    const badge = (s.toLowerCase()==='launched') ? '✅' : (s.toLowerCase()==='rolling out' ? '🚀' : '🧪');
+    label.innerHTML = `<input type="checkbox" id="${id}" data-status="${s}"> ${badge} ${s}`;
+    statBox.appendChild(label);
+  });
+}
+
+function render(items, groupBy){
+  const main = document.getElementById('main');
+  main.innerHTML = '';
+  if(items.length===0){
+    const empty = document.createElement('div');
+    empty.className='empty';
+    empty.textContent='No roadmap items match the current filters.';
+    main.appendChild(empty);
+    return;
+  }
+
+  if(groupBy==='Cloud'){
+    // group by cloud
+    const allClouds = computeFacets(items).clouds;
+    allClouds.forEach(c => {
+      const gitems = items.filter(x => (x.clouds||[]).includes(c));
+      if(gitems.length===0) return; // hide empty headers
+      const g = document.createElement('div');
+      g.className='group';
+      const h = document.createElement('h3');
+      h.textContent = `${CLOUD_EMOJI[c]||'☁️'} ${c} • ${gitems.length}`;
+      g.appendChild(h);
+      gitems.forEach(x => g.appendChild(card(x)));
+      main.appendChild(g);
+    });
+  } else if(groupBy==='Technology'){
+    const techs = computeFacets(items).tech;
+    techs.forEach(t => {
+      const gitems = items.filter(x => (x.products||[]).includes(t));
+      if(gitems.length===0) return;
+      const g = document.createElement('div');
+      g.className='group';
+      const h = document.createElement('h3');
+      h.textContent = `🧩 ${t} • ${gitems.length}`;
+      g.appendChild(h);
+      gitems.forEach(x => g.appendChild(card(x)));
+      main.appendChild(g);
+    });
+  } else {
+    items.forEach(x => main.appendChild(card(x)));
+  }
+}
+
+function card(x){
+  const div = document.createElement('div');
+  div.className='card';
+  const clouds = (x.clouds||[]).map(c=>`<span class="chip">${CLOUD_EMOJI[c]||'☁️'} ${c}</span>`).join('');
+  const tech   = (x.products||[]).map(t=>`<span class="chip">${t}</span>`).join('');
+  const plats  = (x.platforms||[]).map(p=>`<span class="chip">${p}</span>`).join('');
+  div.innerHTML = `
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
+      <div><strong>${x.title||'(no title)'}</strong><br><small>${x.status||''}</small></div>
+      <div>${x.link? `<a href="${x.link}" target="_blank" rel="noopener">Details ↗</a>`:''}</div>
+    </div>
+    ${x.description? `<div style="margin-top:8px">${x.description}</div>`:''}
+    <div style="margin-top:8px">${clouds}</div>
+    <div>${tech}</div>
+    <div>${plats}</div>
+  `;
+  return div;
+}
+
+function collectSelections(selector, attr){
+  const els = Array.from(document.querySelectorAll(selector));
+  const chosen = els.filter(e=>e.checked).map(e=>e.getAttribute(attr));
+  // If "all checked", treat as no filter
+  if(chosen.length === els.length) return [];
+  return chosen;
+}
+
+function applyFilters(){
+  const cloudsSel = collectSelections('#clouds input[type=checkbox]','data-cloud');
+  const techSel   = collectSelections('#tech input[type=checkbox]','data-tech');
+  const platSel   = collectSelections('#plats input[type=checkbox]','data-plat');
+  const statSel   = collectSelections('#status input[type=checkbox]','data-status');
+
+  const mode = document.getElementById('gaMode').checked ? 'quarter' : 'month';
+  const groupBy = document.getElementById('groupBy').value;
+
+  let filtered = DATA.slice(0);
+
+  // Filters (only if some selected)
+  if(cloudsSel.length){
+    filtered = filtered.filter(x => (x.clouds||[]).some(c => cloudsSel.includes(c)));
+  }
+  if(techSel.length){
+    filtered = filtered.filter(x => (x.products||[]).some(t => techSel.includes(t)));
+  }
+  if(platSel.length){
+    filtered = filtered.filter(x => (x.platforms||[]).some(p => platSel.includes(p)));
+  }
+  if(statSel.length){
+    filtered = filtered.filter(x => statSel.includes(String(x.status||'')));
+  }
+
+  // GA Month vs Quarter filter is UI-only here.
+  // We infer month from modifiedRaw or createdRaw.
+  const keyOf = (x) => monthKey(x.modifiedRaw) || monthKey(x.createdRaw);
+  const targetKey = window.__GA_TARGET__ || null;
+  if(targetKey){
+    if(mode==='month'){
+      filtered = filtered.filter(x => keyOf(x) === targetKey);
+    } else {
+      const range = quarterRangeFromYYYYMM(targetKey);
+      if(range){
+        filtered = filtered.filter(x => {
+          const k = keyOf(x);
+          return k && k >= range.start && k <= range.end;
+        });
+      }
+    }
+  }
+
+  render(filtered, groupBy);
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  initUI(DATA);
+  document.getElementById('apply').addEventListener('click', applyFilters);
+  document.getElementById('gaMode').addEventListener('change', applyFilters);
+  document.getElementById('groupBy').addEventListener('change', applyFilters);
+  applyFilters();
+});
+'@
+
+  $html = @"
+<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'/>
+<meta name='viewport' content='width=device-width, initial-scale=1' />
+<title>$Title - $Subtitle</title>
+<style>$css</style>
+</head>
+<body>
+<div class='container'>
+  <aside>
+    <h1>$Title</h1>
+    <small>$Subtitle</small>
+    <hr/>
+    <h2>Cloud Instances</h2>
+    <fieldset id='clouds'></fieldset>
+
+    <h2>Technology</h2>
+    <fieldset id='tech'></fieldset>
+
+    <h2>Platforms</h2>
+    <fieldset id='plats'></fieldset>
+
+    <h2>Status</h2>
+    <fieldset id='status'></fieldset>
+
+    <div class='switch'>
+      <label>
+        <input type='checkbox' id='gaMode' />
+        Include entire quarter
+      </label>
+    </div>
+    <div style='margin-top:8px'>
+      <label>
+        Group by
+        <select id='groupBy'>
+          <option value='Cloud' selected>Cloud</option>
+          <option value='Technology'>Technology</option>
+          <option value='None'>None</option>
+        </select>
+      </label>
+    </div>
+    <button id='apply' class='button'>Apply</button>
+  </aside>
+  <main id='main'></main>
+</div>
+
+<script>
+  window.__GA_TARGET__ = '__GA_TARGET__';
+  const __DATA__ = __JSON__;
+  $js
+</script>
+</body>
+</html>
+"@
+
+  # Return HTML
+  $html
+}
+
+function Filter-RoadmapItems {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][object[]]$Items,
+    [string[]]$Products,
+    [string[]]$Platforms,
+    [string[]]$CloudInstances,
+    [string[]]$ReleasePhase,
+    [string[]]$Status,
+    [datetime]$UpdatedSince,
+    [datetime]$CreatedSince
+  )
+
+  $data = foreach($it in $Items){
+    $arr = Get-RoadmapArrays -Item $it
+    [pscustomobject]@{
+      _src       = $it
+      title      = Get-Prop $it 'title'
+      status     = (Get-Prop $it 'status')
+      products   = $arr.Products
+      platforms  = $arr.Platforms
+      clouds     = $arr.Clouds
+      phases     = $arr.Phases
+      created    = Get-Prop $it 'created'
+      modified   = Get-Prop $it 'modified'
+      createdDt  = ConvertFrom-RoadmapMonth (Get-Prop $it 'created')
+      modifiedDt = ConvertFrom-RoadmapMonth (Get-Prop $it 'modified')
+      link       = Get-Prop $it 'link'
+    }
+  }
+
+  if ($Products -and $Products.Count) {
+    $want = $Products | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    $data = $data | Where-Object { ($_ .products | Where-Object { $want -contains $_ }).Count -gt 0 }
+  }
+  if ($Platforms -and $Platforms.Count) {
+    $want = $Platforms | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    $data = $data | Where-Object { ($_ .platforms | Where-Object { $want -contains $_ }).Count -gt 0 }
+  }
+  if ($CloudInstances -and $CloudInstances.Count) {
+    $want = $CloudInstances | ForEach-Object { Normalize-Cloud $_ } | Where-Object { $_ }
+    $data = $data | Where-Object { ($_ .clouds | Where-Object { $want -contains $_ }).Count -gt 0 }
+  }
+  if ($ReleasePhase -and $ReleasePhase.Count) {
+    # If GA requested, treat as Status 'Launched'
+    $isGA = $ReleasePhase | Where-Object { $_ -match 'General\s+Availability' }
+    if ($isGA) {
+      $Status = @(($Status + @()) + @('Launched')) | Select-Object -Unique
+    } else {
+      # Otherwise, try matching phases when present
+      $want = $ReleasePhase | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+      $data = $data | Where-Object { ($_ .phases | Where-Object { $want -contains $_ }).Count -gt 0 }
+    }
+  }
+  if ($Status -and $Status.Count) {
+    $want = $Status | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ }
+    $data = $data | Where-Object { $want -contains (($_.status) ? $_.status.ToLower() : '') }
+  }
+  if ($CreatedSince) {
+    $data = $data | Where-Object { $_.createdDt -and $_.createdDt -ge $CreatedSince }
+  }
+  if ($UpdatedSince) {
+    $data = $data | Where-Object { $_.modifiedDt -and $_.modifiedDt -ge $UpdatedSince }
+  }
+
+  ,($data | ForEach-Object { $_._src })
+}
+
+function Get-M365ServiceMessages {
+  [CmdletBinding()]
+  param()
+  Write-Verbose "Get-M365ServiceMessages placeholder (not implemented in this module)."
+  @()
+}
+
+function Get-M365Roadmap {
+  [CmdletBinding()]
+  param(
+    # Filters
+    [string[]]$Products,
+    [string[]]$Platforms,
+    [string[]]$CloudInstances,
+    [string[]]$ReleasePhase,
+    [string[]]$Status,
+    [datetime]$UpdatedSince,
+    [datetime]$CreatedSince,
+
+    # Window helpers
+    [switch]$ThisMonth,
+    [switch]$NextMonth,
+    [switch]$NextQuarter,
+
+    # Layout / Output
+    [ValidateSet('Cloud','Technology','None')] [string]$GroupBy = 'Cloud',
+    [int]$Top = 200,
+    [string]$Title = 'Roadmap Briefing',
+    [string]$OutputPath,
+
+    # Graph plumbing (future)
+    [switch]$ConnectGraph,
+    [string]$TenantId,
+    [string]$ClientId,
+    [string]$CertificateThumbprint,
+    [string]$GraphProfile = 'v1.0'
+  )
+
+  Write-Verbose "Begin Get-M365Roadmap"
+  if ($ConnectGraph) {
+    Connect-GraphCertificate -TenantId $TenantId -ClientId $ClientId -CertificateThumbprint $CertificateThumbprint -GraphProfile $GraphProfile -Verbose:$VerbosePreference
+  }
+
+  # Fetch
+  $uri = 'https://www.microsoft.com/releasecommunications/api/v1/m365'
+  Write-Verbose "Fetching Roadmap: $uri"
+  $raw = Invoke-RestMethod -Uri $uri
+  $items = if ($raw.PSObject.Properties['features']) { @($raw.features) } else { @($raw) }
+  Write-Verbose "Items fetched: $($items.Count)"
+
+  # GA window target key for client (based on current or next month)
+  $now = Get-Date
+  $target = '{0:yyyy}-{0:MM}' -f $now
+  if ($NextMonth) { $target = '{0:yyyy}-{0:MM}' -f $now.AddMonths(1) }
+  elseif ($ThisMonth) { $target = '{0:yyyy}-{0:MM}' -f $now }
+  elseif ($NextQuarter) { $target = '{0:yyyy}-{0:MM}' -f $now.AddMonths(1) } # default target to next month within the coming quarter
+  Write-Verbose "GA window target key: $target"
+
+  # Server-side initial filter (optional; keep broad to let client filters work)
+  $filtered = Filter-RoadmapItems -Items $items -Products $Products -Platforms $Platforms -CloudInstances $CloudInstances -ReleasePhase $ReleasePhase -Status $Status -UpdatedSince $UpdatedSince -CreatedSince $CreatedSince
+  Write-Verbose "Items after filter: $($filtered.Count)"
+
+  # Sort by modified/created month (desc)
+  $sortable = @()
+  foreach($it in $filtered){
+    $m = ConvertFrom-RoadmapMonth (Get-Prop $it 'modified')
+    if (-not $m) { $m = ConvertFrom-RoadmapMonth (Get-Prop $it 'created') }
+    $sortable += [pscustomobject]@{ _k = if($m){$m}else{Get-Date '1900-01-01'}; _it=$it }
+  }
+  $filtered = @($sortable | Sort-Object -Property _k -Descending | ForEach-Object { $_._it })
+
+  if ($Top -gt 0 -and $filtered.Count -gt 0) {
+    $filtered = @($filtered | Select-Object -First $Top)
+  }
+
+  # Compose HTML
+  $subtitle = Get-Date -Format 'yyyy-MM-dd'
+  $html = New-RoadmapHtml -Items $filtered -Title $Title -Subtitle $subtitle -GroupBy $GroupBy
+
+  # Inject data JSON + target month
+  $rows = foreach($it in $filtered){
+    $arr = Get-RoadmapArrays -Item $it
+    [pscustomobject]@{
+      id          = Get-Prop $it 'id'
+      title       = Get-Prop $it 'title'
+      description = Get-Prop $it 'description'
+      status      = (Get-Prop $it 'status')
+      products    = $arr.Products
+      platforms   = $arr.Platforms
+      clouds      = $arr.Clouds
+      phases      = $arr.Phases
+      createdRaw  = Get-Prop $it 'created'
+      modifiedRaw = Get-Prop $it 'modified'
+      link        = (Get-Prop $it 'link')
+    }
+  }
+  $json = $rows | ConvertTo-Json -Depth 6
+
+  $html = $html -replace '__JSON__',[System.Text.RegularExpressions.Regex]::Escape($json)
+  $html = $html -replace '__GA_TARGET__',[System.Text.RegularExpressions.Regex]::Escape($target)
+
+  # Write output
+  if (-not $OutputPath) {
+    $fileName = 'Roadmap_Briefing_{0}.html' -f (Get-Date -Format 'yyyyMMdd-HHmmss')
+    $OutputPath = Join-Path (Get-Location) $fileName
+  }
+  Write-Verbose "Output path: $OutputPath"
+  Set-Content -Path $OutputPath -Value $html -Encoding UTF8
+
+  Write-Host "Roadmap briefing written to: $OutputPath"
+  return $OutputPath
+}
+
+#endregion
+
+Export-ModuleMember -Function Connect-GraphCertificate,Get-M365ServiceMessages,Get-M365Roadmap

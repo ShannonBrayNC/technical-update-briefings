@@ -1,0 +1,18 @@
+PROJECT: Briefing bot + PS modules
+LANGUAGES: PowerShell 7.x, TypeScript/React. No C++/C# syntax.
+
+POWERSHELL RULES
+- Target PowerShell 7+. Add `#requires -Version 7.0` to scripts.
+- Avoid here-strings unless explicitly requested; prefer single-line strings or multiline arrays + -join.
+- Normalize case w/ `.ToLowerInvariant()`; cast to arrays w/ `@(...)` before `.Count`.
+- Filters return booleans; avoid Measure-Object for truthiness tests.
+- Use Pester for tests; include negative tests for regressions.
+
+TS/REACT RULES
+- Vite + React 18; strict TS.
+- No ambient global hacks; prefer explicit types.
+- Adaptive Cards v1.5; Actions.Submit payloads: { action, topicId }.
+
+STYLE/SAFETY
+- Idempotency keys on enqueue; no network secrets in client.
+- Prefer explicit env var names (cert-based auth).

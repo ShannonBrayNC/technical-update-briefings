@@ -1,0 +1,26 @@
+name: ci
+on:
+  push: { branches: [ main ] }
+  pull_request: { branches: [ main ] }
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '18' }
+      - name: Install Node deps
+        run: npm ci
+      - name: Run ESLint
+        run: npm run lint
+      - name: Install PowerShell modules
+        shell: pwsh
+        run: |
+          Install-Module Pester -Force -Scope CurrentUser
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+      - name: Precheck (PowerShell)
+        shell: pwsh
+        run: ./build/Precheck.ps1
+      - name: Pester tests
+        shell: pwsh
+        run: Invoke-Pester -CI -Path ./tests

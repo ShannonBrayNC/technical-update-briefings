@@ -1,0 +1,598 @@
+
+<#  M365.RoadmapStyled.psm1  (PowerShell 7+)
+    Clean minimal rebuild: fetch M365 Roadmap API, filter, and render styled HTML.
+    Exports:
+      - Get-M365Roadmap
+      - Connect-GraphCertificate (stub for future Graph use)
+      - Get-M365ServiceMessages (stub passthrough for future consolidation)
+#>
+
+using namespace System.Collections.Generic
+
+function Ensure-List {
+    param([Parameter(Mandatory)][object]$Value)
+    if ($null -eq $Value) { return @() }
+    if ($Value -is [System.Array]) { return @($Value) }
+    return @($Value)
+}
+
+function Ensure-StringList {
+    param([object]$Value)
+    $list = Ensure-List $Value
+    return @($list | Where-Object {$_} | ForEach-Object {[string]$_})
+}
+
+function Normalize-RoadmapItem {
+    param([Parameter(Mandatory)][psobject]$Item)
+
+    # Pull tags from tagsContainer if present, else from root (be liberal)
+    $tc = $Item.tagsContainer
+    $products = if ($tc -and $tc.PSObject.Properties['products']) { Ensure-StringList $tc.products } else { Ensure-StringList $Item.products }
+    $platforms = if ($tc -and $tc.PSObject.Properties['platforms']) { Ensure-StringList $tc.platforms } else { Ensure-StringList $Item.platforms }
+    $clouds   = if ($tc -and $tc.PSObject.Properties['clouds'])   { Ensure-StringList $tc.clouds }   else { Ensure-StringList $Item.clouds }
+    $phases   = if ($tc -and $tc.PSObject.Properties['releasePhase']) { Ensure-StringList $tc.releasePhase } else { Ensure-StringList $Item.releasePhase }
+
+    # Normalize casing
+    $products = @($products | ForEach-Object { $_.Trim() })
+    $platforms = @($platforms | ForEach-Object { $_.Trim() })
+    $clouds = @($clouds | ForEach-Object { $_.Trim() })
+    $phases = @($phases | ForEach-Object { $_.Trim() })
+
+    # Dates
+    $created = $null
+    $modified = $null
+    if ($Item.PSObject.Properties['created']) {
+        [datetime]::TryParse([string]$Item.created, [ref]$created) | Out-Null
+    }
+    if ($Item.PSObject.Properties['modified']) {
+        [datetime]::TryParse([string]$Item.modified, [ref]$modified) | Out-Null
+    }
+
+    [pscustomobject]@{
+        id          = $Item.id
+        title       = [string]$Item.title
+        description = [string]$Item.description
+        status      = [string]$Item.status
+        created     = $created
+        modified    = $modified
+        products    = $products
+        platforms   = $platforms
+        clouds      = $clouds
+        phases      = $phases
+        raw         = $Item
+        gaText = (Get-GAText -Item $Item)
+
+    }
+}
+
+function ConvertFrom-RoadmapDate {
+    param([object]$Value)
+    if ($null -eq $Value) { return $null }
+    $dt = $null
+    if ($Value -is [datetime]) { return $Value }
+    [datetime]::TryParse([string]$Value, [ref]$dt) | Out-Null
+    return $dt
+}
+
+function Filter-RoadmapItems {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject[]]$Items,
+        [string[]]$CloudInstances,
+        [string[]]$Products,
+        [string[]]$Platforms,
+        [string[]]$ReleasePhase,
+        [string[]]$Status,
+        [Nullable[]]$GAFrom,
+        [Nullable[datetime]] $1
+    )
+    $data = @($Items | ForEach-Object { Normalize-RoadmapItem $_ })
+
+    if ($Products -and $Products.Count -gt 0) {
+        $want = @($Products | ForEach-Object { $_.ToLowerInvariant().Trim() })
+        $data = $data | Where-Object { ($_.products | ForEach-Object { $_.ToLowerInvariant() }) | Where-Object { $want -contains $_ } | Measure-Object | Select-Object -ExpandProperty Count } | ForEach-Object {
+            if ($_ -gt 0) { $true } else { $false }
+        } | ForEach-Object { $true }  # ensure pipeline not empty
+        $data = @($Items | ForEach-Object { Normalize-RoadmapItem $_ } | Where-Object {
+            ($_.products | ForEach-Object { $_.ToLowerInvariant() } | Where-Object { $want -contains $_ }).Count -gt 0
+        })
+    }
+
+    if ($Platforms -and $Platforms.Count -gt 0) {
+        $want = @($Platforms | ForEach-Object { $_.ToLowerInvariant().Trim() })
+        $data = @($data | Where-Object {
+            ($_.platforms | ForEach-Object { $_.ToLowerInvariant() } | Where-Object { $want -contains $_ }).Count -gt 0
+        })
+    }
+
+    if ($CloudInstances -and $CloudInstances.Count -gt 0) {
+        $want = @($CloudInstances | ForEach-Object { $_.ToLowerInvariant().Trim() })
+        $data = @($data | Where-Object {
+            ($_.clouds | ForEach-Object { $_.ToLowerInvariant() } | Where-Object { $want -contains $_ }).Count -gt 0
+        })
+    }
+
+    if ($ReleasePhase -and $ReleasePhase.Count -gt 0) {
+        $want = @($ReleasePhase | ForEach-Object { $_.ToLowerInvariant().Trim() })
+        # Also map 'General Availability' to status 'Launched' as a fallback
+        $data = @($data | Where-Object {
+            ($_.phases | ForEach-Object { $_.ToLowerInvariant() } | Where-Object { $want -contains $_ }).Count -gt 0 -or
+            ($want -contains 'general availability' -and ($_.status).ToLowerInvariant() -eq 'launched')
+        })
+    }
+
+    if ($Status -and $Status.Count -gt 0) {
+        $want = @($Status | ForEach-Object { $_.ToLowerInvariant().Trim() })
+        $data = @($data | Where-Object { ($_.status).ToLowerInvariant() -in $want })
+    }
+
+    if ($UpdatedSince) {
+        $data = @($data | Where-Object {
+            $d = ConvertFrom-RoadmapDate $_.modified
+            if ($d) { $d -ge $UpdatedSince } else { $false }
+        })
+    }
+    if ($CreatedSince) {
+        $data = @($data | Where-Object {
+            $d = ConvertFrom-RoadmapDate $_.created
+            if ($d) { $d -ge $CreatedSince } else { $false }
+        })
+    }
+
+    return ,$data
+}
+
+function New-RoadmapHtml {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][psobject[]]$Items,
+        [string]$Title = 'Roadmap Briefing',
+        [string]$Subtitle,
+        [ValidateSet('Cloud','Product','Platform','None')][string]$GroupBy = 'Cloud'
+    )
+
+    $items = @($Items)
+    $date = Get-Date -Format 'yyyy-MM-dd'
+
+    $rows = foreach ($it in $items) {
+        $clouds = if ($it.clouds) { ($it.clouds -join ', ') } else { '—' }
+        $platforms = if ($it.platforms) { ($it.platforms -join ', ') } else { '—' }
+        $products = if ($it.products) { ($it.products -join ', ') } else { '—' }
+        $phase = if ($it.phases) { ($it.phases -join ', ') } else { '—' }
+        $status = if ($it.status) { $it.status } else { '—' }
+@"
+<div class='card' data-clouds='$clouds' data-products='$products' data-platforms='$platforms' data-phase='$phase' data-status='$status'>
+  <div class='card-title'>$($it.title -replace '&','&amp;')</div>
+  <div class='meta'>
+    <span class='badge cloud'>$clouds</span>
+    <span class='badge product'>$products</span>
+    <span class='badge platform'>$platforms</span>
+    <span class='badge phase'>$phase</span>
+    <span class='badge status'>$status</span>
+  </div>
+  <div class='desc'>$($it.description)</div>
+</div>
+"@
+    }
+
+    $rowsHtml = ($rows -join "`n")
+    $count = $items.Count
+
+@"
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>$Title</title>
+<style>
+  body{font-family:Segoe UI,Arial,sans-serif;margin:24px;background:#0b1220;color:#e8eefc}
+  .hdr{display:flex;align-items:baseline;gap:12px;margin-bottom:16px}
+  h1{margin:0;font-size:22px}
+  .sub{opacity:.8}
+  .ctrls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:16px 0}
+  .card{background:#121a2a;border:1px solid #1f2a44;border-radius:12px;padding:12px;margin:10px 0}
+  .card-title{font-weight:600;margin-bottom:6px}
+  .badge{background:#1b2540;border:1px solid #31416b;border-radius:999px;padding:2px 8px;margin-right:6px;font-size:12px}
+  .muted{opacity:.7}
+  button{background:#2b3b6b;border:1px solid #3e5396;color:#fff;padding:6px 10px;border-radius:8px;cursor:pointer}
+  button:hover{filter:brightness(1.1)}
+  .count{font-size:12px;opacity:.8}
+</style>
+</head>
+<body>
+  <div class="hdr">
+    <h1>$Title</h1><span class="sub">$Subtitle • $date</span><span class="count" id="count">($count)</span>
+  </div>
+  <div class="ctrls">
+    <label><input type="checkbox" class="cloud" value="GCC"> GCC</label>
+    <label><input type="checkbox" class="cloud" value="GCC High"> GCC High</label>
+    <label><input type="checkbox" class="cloud" value="DoD"> DoD</label>
+    <label><input type="checkbox" class="cloud" value="Worldwide (Standard Multi-Tenant)"> Worldwide</label>
+    <button id="apply">Apply</button>
+    <button id="clear">Clear</button>
+  </div>
+  <div id="list">
+    $rowsHtml
+  </div>
+<script>
+(function(){
+  function getSel(cls){
+    return Array.from(document.querySelectorAll('input.'+cls+':checked')).map(el=>el.value.toLowerCase());
+  }
+  function show(el){ el.style.display=''; }
+  function hide(el){ el.style.display='none'; }
+  function normList(s){ return s.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean); }
+
+  function apply(){
+    const clouds = getSel('cloud');
+    const cards = Array.from(document.querySelectorAll('.card'));
+    let shown = 0;
+
+    cards.forEach(c=>{
+      const cClouds = normList(c.dataset.clouds || '');
+      let ok = true;
+
+      if (clouds.length){
+        ok = cClouds.some(x => clouds.includes(x));
+      }
+
+      if (ok){ show(c); shown++; } else { hide(c); }
+    });
+
+    document.getElementById('count').textContent = '('+shown+')';
+  }
+
+  document.getElementById('apply').addEventListener('click', apply);
+  document.getElementById('clear').addEventListener('click', ()=>{
+    document.querySelectorAll('input[type=checkbox]').forEach(x=>x.checked=false);
+    document.getElementById('count').textContent = '('+document.querySelectorAll('.card').length+')';
+    document.querySelectorAll('.card').forEach(show);
+  });
+})();
+</script>
+</body>
+</html>
+"@
+}
+
+function Connect-GraphCertificate {
+    [CmdletBinding()]
+    param(
+      [string]$TenantId,
+      [string]$ClientId,
+      [string]$CertificateThumbprint
+    )
+    Write-Verbose "Graph certificate plumbing placeholder (PS7+ ready)."
+}
+
+function Get-M365ServiceMessages {
+    [CmdletBinding()]
+    param([switch]$PassThru)
+    if ($PassThru) { return @() }  # placeholder
+    Write-Verbose "Service Messages placeholder for future consolidation."
+}
+
+function Get-M365Roadmap {
+  [CmdletBinding()]
+  param(
+    # Output / grouping
+    [ValidateSet('Cloud','Product','Status','None')]
+    [string]$GroupBy = 'Cloud',
+    [string]$Title   = 'Microsoft 365 Roadmap Briefing',
+    [string]$OutputPath,
+
+    # Filters (all optional)
+    [string[]]$Products,
+    [string[]]$Platforms,
+    [string[]]$CloudInstances,
+    [ValidateSet('In development','Rolling out','Launched','Cancelled')]
+    [string[]]$Status,
+    [string[]]$ReleasePhase,
+    [string]$Text,
+
+    # Date filters (nullable so $null is always OK)
+    [Nullable[datetime]]$UpdatedSince,
+    [Nullable[datetime]]$CreatedSince,
+    [Nullable[datetime]]$GAFrom,
+    [Nullable[datetime]]$GATo,
+
+    # Convenience switches for GA window
+    [switch]$NextMonth,   # sets GAFrom/GATo to next month if not explicitly provided
+    [switch]$GAQuarter,   # with -NextMonth, widens GA to full quarter
+
+    # Misc
+    [int]$Top = 0,
+
+    # Graph plumbing placeholders (unused for roadmap feed, kept for future)
+    [switch]$ConnectGraph,
+    [string]$TenantId,
+    [string]$ClientId,
+    [string]$CertificateThumbprint
+  )
+
+  Write-Verbose "Begin Get-M365Roadmap"
+
+  # 1) Fetch the Microsoft roadmap feed
+  $uri = 'https://www.microsoft.com/releasecommunications/api/v1/m365'
+  Write-Verbose ("Fetching Roadmap: {0}" -f $uri)
+  try {
+    $raw = Invoke-RestMethod -Uri $uri
+  } catch {
+    throw "Failed to fetch roadmap feed: $($_.Exception.Message)"
+  }
+
+  if ($null -eq $raw) { throw "Roadmap feed returned null." }
+
+  # Normalize shapes (array vs {features:[]})
+  $items = @()
+  if     ($raw -is [array])                        { $items = @($raw) }
+  elseif ($raw.PSObject.Properties['features'])    { $items = @($raw.features) }
+  else                                            { $items = @($raw) }
+
+  Write-Verbose ("Items fetched: {0}" -f $items.Count)
+
+  # 2) GA window convenience (only if GAFrom/GATo not explicitly provided)
+  if (-not $GAFrom -and -not $GATo -and $NextMonth) {
+    $firstNext = (Get-Date -Day 1).AddMonths(1)
+    $gaStart   = Get-Date -Date $firstNext.Date
+    $gaEnd     = $firstNext.AddMonths(1).AddDays(-1).Date
+
+    if ($GAQuarter) {
+      $q      = [int][math]::Ceiling($firstNext.Month/3.0)
+      $qStart = Get-Date -Year $firstNext.Year -Month (3*($q-1)+1) -Day 1
+      $qEnd   = $qStart.AddMonths(3).AddDays(-1)
+      $gaStart = $qStart
+      $gaEnd   = $qEnd
+    }
+
+    $GAFrom = $gaStart
+    $GATo   = $gaEnd
+    Write-Verbose ("GA window: {0:d}..{1:d} (planned months via GA text)" -f $GAFrom,$GATo)
+  }
+
+  # 3) --- Build filter args and drop null/empty ---
+  $filterArgs = @{
+    Items          = $items
+    Products       = $Products
+    Platforms      = $Platforms
+    CloudInstances = $CloudInstances
+    ReleasePhase   = $ReleasePhase
+    Status         = $Status
+    Text           = $Text
+    UpdatedSince   = $UpdatedSince
+    CreatedSince   = $CreatedSince
+    GAFrom         = $GAFrom
+    GATo           = $GATo
+  }
+
+  foreach($k in @('Products','Platforms','CloudInstances','ReleasePhase','Status','Text',
+                  'UpdatedSince','CreatedSince','GAFrom','GATo')) {
+    if ($filterArgs.ContainsKey($k)) {
+      $v = $filterArgs[$k]
+      if ($null -eq $v -or ($v -is [array] -and $v.Count -eq 0) -or
+          ($v -is [string] -and [string]::IsNullOrWhiteSpace($v))) {
+        $null = $filterArgs.Remove($k)
+      }
+    }
+  }
+
+  # 4) Filter
+  if (Get-Command Filter-RoadmapItems -ErrorAction SilentlyContinue) {
+    $items = Filter-RoadmapItems @filterArgs
+  } else {
+    # Minimal, safe fallback so you never get a white page if helper isn't present
+    $items = @($items)
+    if ($filterArgs['Text']) {
+      $needle = [regex]::Escape($filterArgs['Text'])
+      $items = @($items | Where-Object {
+        (($_.title) -match $needle) -or (($_.description) -match $needle)
+      })
+    }
+    if ($filterArgs['Status']) {
+      $want = @($filterArgs['Status']) | ForEach-Object { $_.ToLowerInvariant() }
+      $items = @($items | Where-Object { ([string]($_.status)).ToLowerInvariant() -in $want })
+    }
+    if ($filterArgs['ReleasePhase']) {
+      $want = @($filterArgs['ReleasePhase']) | ForEach-Object { $_.ToLowerInvariant() }
+      $items = @($items | Where-Object {
+        $tc = $_.tagsContainer
+        $ph = if ($tc -and $tc.PSObject.Properties['releasePhase']) { @($tc.releasePhase) } else { @() }
+        ($ph | ForEach-Object { $_.ToLowerInvariant() } | Where-Object { $want -contains $_ }).Count -gt 0
+      })
+    }
+    if ($filterArgs['CloudInstances']) {
+      $want = @($filterArgs['CloudInstances']) | ForEach-Object { $_.ToLowerInvariant() }
+      $items = @($items | Where-Object {
+        $tc = $_.tagsContainer
+        $clouds = if     ($tc -and $tc.PSObject.Properties['cloudInstances']) { @($tc.cloudInstances) }
+                  elseif ($_.PSObject.Properties['cloudInstances'])           { @($_.cloudInstances) }
+                  else                                                        { @() }
+        ($clouds | ForEach-Object { $_.ToLowerInvariant() } | Where-Object { $want -contains $_ }).Count -gt 0
+      })
+    }
+    # Note: Products/Platforms omitted in fallback for brevity — main helper should handle them.
+  }
+
+  if ($Top -gt 0 -and $items.Count -gt $Top) {
+    $items = @($items | Select-Object -First $Top)
+  }
+
+  Write-Verbose ("Items after filter: {0}" -f $items.Count)
+
+  # 5) Render HTML (use your styled builder if present)
+  if (-not $OutputPath) {
+    $OutputPath = Join-Path -Path (Get-Location) -ChildPath ("Roadmap_Briefing_{0}.html" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+  }
+
+  $subtitle = (Get-Date).ToString('yyyy-MM-dd')
+  $html = $null
+  $builder = Get-Command New-RoadmapHtml -ErrorAction SilentlyContinue
+  try {
+    if ($builder) {
+      if ($GAFrom -and $GATo) {
+        $html = New-RoadmapHtml -Items $items -Title $Title -Subtitle $subtitle -GroupBy $GroupBy -GAFrom $GAFrom -GATo $GATo
+      } else {
+        $html = New-RoadmapHtml -Items $items -Title $Title -Subtitle $subtitle -GroupBy $GroupBy
+      }
+    }
+  } catch {
+    # swallow and fallback to basic HTML
+    $html = $null
+  }
+
+  if (-not $html) {
+    # Basic fallback so we never ship a blank page
+    $rows = $items | ForEach-Object {
+      "<li><strong>$($_.title)</strong> — <em>$($_.status)</em></li>"
+    }
+    $html = @"
+<!doctype html>
+<html><head><meta charset="utf-8"><title>$Title</title></head>
+<body>
+<h1>$Title</h1>
+<p><small>Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm')</small></p>
+<ul>
+$($rows -join "`r`n")
+</ul>
+</body></html>
+"@
+  }
+
+  Set-Content -Path $OutputPath -Value $html -Encoding UTF8
+  Write-Host "Roadmap briefing written to: $OutputPath"
+  return $OutputPath
+}
+
+
+Export-ModuleMember -Function Get-M365Roadmap,Connect-GraphCertificate,Get-M365ServiceMessages
+
+
+
+
+# ==== patched on 2025-08-27 21:56:01 ====
+function Filter-RoadmapItems {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)] [object[]] $Items,
+
+    [string[]] $Products,
+    [string[]] $Platforms,
+    [string[]] $CloudInstances,
+    [string[]] $ReleasePhase,
+    [string[]] $Status,
+    [string]   $Text,
+
+    [datetime] $UpdatedSince,
+    [datetime] $CreatedSince,
+
+    # Correct types — single DateTime values, nullable by omission
+    [datetime] $GAFrom,
+    [datetime] $GATo
+  )
+
+  # local helpers so we don't depend on other module functions
+  function _list($x){ if($null -eq $x){ @() } elseif($x -is [string]){ @($x) } else { @($x) } }
+  function _norm($x){ (_list $x) | ForEach-Object { $_.ToString().Trim() } }
+  function _lower($x){ (_norm $x) | ForEach-Object { $_.ToLowerInvariant() } }
+
+  function _toDate([object]$v){
+    # prefer module helper if present
+    $cf = Get-Command -Name ConvertFrom-RoadmapDate -ErrorAction SilentlyContinue
+    if($cf){ return ConvertFrom-RoadmapDate $v }
+    if([string]::IsNullOrWhiteSpace([string]$v)){ return $null }
+    $s = [string]$v
+
+    # "September CY2025"
+    if($s -match '^(?<mon>[A-Za-z]+)\s+CY(?<y>\d{4})$'){
+      $m = [datetime]::ParseExact($Matches.mon,'MMMM',[Globalization.CultureInfo]::InvariantCulture).Month
+      return Get-Date -Year $Matches.y -Month $m -Day 1
+    }
+    # "Q3 CY2025" -> first month of quarter
+    if($s -match '^Q(?<q>[1-4])\s+CY(?<y>\d{4})$'){
+      $startMonth = 1 + ([int]$Matches.q - 1) * 3
+      return Get-Date -Year $Matches.y -Month $startMonth -Day 1
+    }
+    $dt = $null
+    if([datetime]::TryParse($s, [ref]$dt)){ return $dt }
+    return $null
+  }
+
+  $data = @($Items)
+
+  if($Products){
+    $want = _lower $Products
+    $data = $data | Where-Object {
+      (_lower ($_.products)) | Where-Object { $want -contains $_ } | Measure-Object | Select-Object -ExpandProperty Count
+    }
+  }
+
+  if($Platforms){
+    $want = _lower $Platforms
+    $data = $data | Where-Object {
+      (_lower ($_.platforms)) | Where-Object { $want -contains $_ } | Measure-Object | Select-Object -ExpandProperty Count
+    }
+  }
+
+  if($CloudInstances){
+    $want = _lower $CloudInstances
+    $data = $data | Where-Object {
+      (_lower ($_.clouds)) | Where-Object { $want -contains $_ } | Measure-Object | Select-Object -ExpandProperty Count
+    }
+  }
+
+  if($ReleasePhase){
+    $want = _lower $ReleasePhase
+    $data = $data | Where-Object {
+      (_lower ($_.phases)) | Where-Object { $want -contains $_ } | Measure-Object | Select-Object -ExpandProperty Count
+    }
+  }
+
+  if($Status){
+    $want = _lower $Status
+    $data = $data | Where-Object {
+      $s = $_.status
+      if($null -eq $s){ $false } else { $want -contains $s.ToString().ToLowerInvariant() }
+    }
+  }
+
+  if($UpdatedSince){
+    $data = $data | Where-Object {
+      $d = _toDate $_.modified
+      $d -and $d -ge $UpdatedSince
+    }
+  }
+
+  if($CreatedSince){
+    $data = $data | Where-Object {
+      $d = _toDate $_.created
+      $d -and $d -ge $CreatedSince
+    }
+  }
+
+  if($GAFrom -or $GATo){
+    $from = if($GAFrom){ $GAFrom } else { [datetime]::MinValue }
+    $to   = if($GATo){   $GATo   } else { [datetime]::MaxValue }
+    $data = $data | Where-Object {
+      $ga = _toDate $_.generalAvailability
+      $ga -and $ga -ge $from -and $ga -le $to
+    }
+  }
+
+  if($Text){
+    $needle = $Text.ToLowerInvariant()
+    $data = $data | Where-Object {
+      $hay = @(
+        $_.id, $_.title, $_.description,
+        (_list $_.products)  -join ' ',
+        (_list $_.platforms) -join ' ',
+        (_list $_.clouds)    -join ' ',
+        (_list $_.phases)    -join ' '
+      ) -join ' '
+      $hay.ToLowerInvariant().Contains($needle)
+    }
+  }
+
+  ,@($data)  # return array even for 0/1 items
+}
+# ==== end patched ====
+
