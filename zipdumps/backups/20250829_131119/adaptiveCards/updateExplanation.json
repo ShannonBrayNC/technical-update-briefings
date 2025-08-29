@@ -1,0 +1,53 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "type": "AdaptiveCard",
+  "version": "1.5",
+  "body": [
+    {
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "size": "Medium",
+      "text": "Explanation: ${title}",
+      "wrap": true
+    },
+    {
+      "type": "TextBlock",
+      "isSubtle": true,
+      "text": "${product} \u00b7 ${category} \u00b7 ${status}",
+      "wrap": true
+    },
+    {
+      "type": "TextBlock",
+      "text": "${explanation}",
+      "wrap": true
+    },
+    {
+      "type": "FactSet",
+      "facts": [
+        {
+          "title": "Impact",
+          "value": "${impact}"
+        },
+        {
+          "title": "Action",
+          "value": "${actionRequired}"
+        },
+        {
+          "title": "Phase",
+          "value": "${rolloutPhase}"
+        },
+        {
+          "title": "Updated",
+          "value": "${DATEFORMAT(lastUpdatedAt, 'MMM dd, yyyy')}"
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "type": "Action.OpenUrl",
+      "title": "Source",
+      "url": "${links[0].url}"
+    }
+  ]
+}

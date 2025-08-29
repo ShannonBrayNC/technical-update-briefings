@@ -1,12 +1,9 @@
-# Briefing Bot + Guardrails
+# Build the full Roadmap deck NOW (no filtering)
 
-This package includes the Teams bot/tab scaffold **and** guardrails to prevent regressions (docs, ADR, Pester, Precheck, ESLint).
+This drop renders EVERY roadmap item into `RoadmapDeck_AutoGen.pptx` immediately.
 
-## Quick start
+## Run
 ```bash
 npm i
-npm run server:dev     # http://localhost:3978
-npm run client:dev     # http://localhost:5173
-# Guardrails
-npm run check          # Precheck (PS), Pester, ESLint
+npm run deck:full
 ```

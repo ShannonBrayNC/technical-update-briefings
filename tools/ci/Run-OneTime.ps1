@@ -1,5 +1,5 @@
 # 0) Make sure you're in the repo root
-cd C:\technical_update_briefings
+cd C:\technical_update_briefings\packages
 
 # 1) Ensure workspaces are declared at root (once)
 npm pkg set workspaces[0]="packages/*"

@@ -1,35 +1,8 @@
 {
-  "name": "technical-update-briefings",
-  "version": "1.0.0",
-  "description": "This package includes the Teams bot/tab scaffold **and** guardrails to prevent regressions (docs, ADR, Pester, Precheck, ESLint).",
-  "main": "index.js",
-  "directories": {
-    "doc": "docs",
-    "test": "tests"
-  },
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "precheck": "pwsh -NoLogo -File ./build/Precheck.ps1",
-    "ps:test": "pwsh -NoLogo -Command Invoke-Pester -CI -Path ./tests",
-    "lint": "eslint packages/**/{server,tab,src}/**/*.{ts,tsx,js} --max-warnings=0",
-    "validate": "node tools/ci/validate-workspaces.mjs",
-    "check": "npm run precheck && npm run ps:test && npm run lint && npm run validate"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "private": "true",
+  "name": "@briefings/deck-runner",
+  "version": "0.1.0",
   "type": "module",
-  "workspaces": [
-    "packages/*"
-  ],
-  "devDependencies": {
-    "@eslint/eslintrc": "^3.3.1",
-    "@eslint/js": "^9.34.0",
-    "@typescript-eslint/eslint-plugin": "8.0.0",
-    "@typescript-eslint/parser": "8.0.0",
-    "eslint": "9.12.0",
-    "eslint-plugin-react": "7.37.5",
-    "eslint-plugin-react-hooks": "5.2.0"
-  }
+  "scripts": { "deck:full": "ts-node scripts/buildDeck.ts" },
+  "dependencies": { "pptxgenjs": "^3.15.0", "isomorphic-fetch": "^3.0.0" },
+  "devDependencies": { "ts-node": "^10.9.2", "typescript": "^5.5.4" }
 }

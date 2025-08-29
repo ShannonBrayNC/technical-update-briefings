@@ -1,7 +1,7 @@
 {
   "Inputs": [
-    "C:/technical_update_briefings/tools/roadmap/RoadmapPrimarySource.html",
-    "C:/technical_update_briefings/tools/message_center/MessageCenterBriefingSuppliments.html"
+    "..//roadmap//RoadmapPrimarySource.html",
+    "..//message_center//MessageCenterBriefingSuppliments.html"
   ],
   "Output": "C:/technical_update_briefings/RoadmapDeck_AutoGen.pptx",
   "Month": "September 2025",

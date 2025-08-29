@@ -874,10 +874,7 @@ def main() -> None:
         "logo": args.logo,
         "logo2": args.logo2,
         "rocket": args.rocket,
-        "magnifier": args.magnifier,
-        "admin": args.admin,
-        "user": args.user,
-        "check": args.check,
+        "magnifier": args.magnifier
     }
 
     
