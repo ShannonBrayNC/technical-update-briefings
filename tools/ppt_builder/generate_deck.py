@@ -16,6 +16,11 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
 from pptx.util import Inches, Pt
 
+# new import
+from parsers import parse_message_center_html, parse_roadmap_html
+from dataclasses import fields as _dc_fields
+
+
 # ----------------------------
 # Constants / theme
 # ----------------------------
@@ -50,6 +55,84 @@ def inches_to_emu(x: float | int | None) -> int:
     return int(round(float(x) * EMU_PER_INCH))
 
 
+# --- stdlib
+import os, sys, re, traceback
+from typing import Any, List, Dict, Optional
+
+# --- third-party
+from bs4 import BeautifulSoup
+
+# --- bs4-safe helpers
+def _txt(x: Any) -> str:
+    try:
+        return x.get_text(strip=True)  # type: ignore[attr-defined]
+    except Exception:
+        return "" if x is None else str(x)
+
+def _attr(x: Any, name: str) -> str:
+    try:
+        v = x.get(name)  # type: ignore[call-arg, attr-defined]
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v
+        # bs4 can return list-like attrs
+        try:
+            return " ".join(v)
+        except Exception:
+            return str(v)
+    except Exception:
+        return ""
+
+def first(el: Any, css: str) -> Any:
+    try:
+        return el.select_one(css)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+def all_of(el: Any, css: str) -> List[Any]:
+    try:
+        res = el.select(css)  # type: ignore[attr-defined]
+        return list(res) if res else []
+    except Exception:
+        return []
+
+   
+
+def _to_item(d: dict[str, Any]) -> Item:
+    valid = {f.name for f in _dc_fields(Item)}
+    data: dict[str, Any] = {k: d.get(k) for k in valid}
+
+    # Normalize core string fields
+    for k in ("title", "summary", "url", "roadmap_id", "status", "month"):
+        v = data.get(k)
+        data[k] = "" if v is None else str(v)
+
+    # Normalize list-ish fields to list[str]
+    list_fields = ("products", "platforms", "audience", "phases", "clouds")
+    for k in list_fields:
+        v = data.get(k)
+        if v is None:
+            data[k] = []
+        elif isinstance(v, (list, tuple, set)):
+            data[k] = [str(x) for x in v if x is not None]
+        else:
+            # Single value -> wrap
+            data[k] = [str(v)]
+
+    # Optional date-ish fields -> strings
+    for k in ("created", "modified", "ga"):
+        v = data.get(k)
+        if v is None:
+            data[k] = ""
+        else:
+            data[k] = str(v)
+
+    return Item(**data)
+
+
+
+
 def _to_text(val: Any) -> str:
     """Turn bs4 values (str | list[str] | Tag | NavigableString | None) into text."""
     if val is None:
@@ -74,10 +157,6 @@ def _inches(x: Optional[float]) -> int:
 def _pt(x: Optional[float]) -> int:
     """Return EMU from points, accepting None by coercing to 0.0."""
     return Pt(0.0 if x is None else float(x))
-
-
-def _clean(s: Any) -> str:
-    return re.sub(r"\s+", " ", _to_text(s)).strip()
 
 
 def smart_split_product_title(title: str) -> tuple[str, str]:
@@ -136,6 +215,19 @@ def add_picture_safe(
     return slide.shapes.add_picture(
         image_path, left, top, width=_inches(width_in), height=_inches(height_in)
     )
+
+
+
+def safe_find(node: Tag | None, name, **kwargs) -> Tag | None:
+    if not _is_tag(node):
+        return None
+    t = node.find(name, **kwargs)
+    return t if _is_tag(t) else None
+
+def safe_find_all(node: Tag | None, name, **kwargs) -> list[Tag]:
+    if not _is_tag(node):
+        return []
+    return [t for t in node.find_all(name, **kwargs) if _is_tag(t)]
 
 
 def add_title_box(
@@ -288,18 +380,182 @@ def _safe_save(prs, output_path: str, tries: int = 4, delay_sec: float = 0.6) ->
 # ----------------------------
 # Data model
 # ----------------------------
+
+# ---------- CORE MODEL & SAFE HELPERS ----------
+
+
+from dataclasses import dataclass, field, asdict
+from typing import List, Optional, Iterable, Any, Sequence
+import os, csv, re, datetime as _dt
+
+from bs4 import BeautifulSoup  # keep BS import simple
+from bs4.element import Tag as Bs4Tag, NavigableString as Bs4Nav, PageElement as Bs4El, ResultSet as Bs4RS
+
+# Colors / constants (optional)
+PHASE_TO_STATUS_MAP = {
+    "in development": "In development",
+    "rolling out": "Rolling out",
+    "launched": "Launched",
+    "preview": "Preview",
+    "cancelled": "Cancelled",
+    "delayed": "Delayed",
+}
+
+# --- Data model used by slide builder ---
 @dataclass
 class Item:
-    title: str
-    summary: str
-    product: str
-    month: str
-    status: str
-    roadmap_id: str
-    url: str
-    audience: str  # "Admin", "End user", etc.
-    date_str: str
-    notes: str
+    # required-ish
+    title: str = ""
+    summary: str = ""          # short synopsis
+    description: str = ""      # longer body if present
+    roadmap_id: str = ""       # "MC#####" or similar / roadmap numeric id
+    url: str = ""              # canonical link
+    month: str = ""            # e.g., "September 2025"
+
+    # categorization
+    product: str = ""          # primary product string
+    products: List[str] = field(default_factory=list)
+    platforms: List[str] = field(default_factory=list)  # Win/Mac/iOS/Web, etc.
+    audience: List[str] = field(default_factory=list)   # Admins/Users/etc.
+    clouds: List[str] = field(default_factory=list)     # GCC/GCC-H/DoD/Commercial, etc.
+
+    # lifecycle
+    status: str = ""           # In development / Rolling out / Preview / Launched / …
+    phases: str = ""           # raw phases text if source uses it
+    created: str = ""          # dates as plain strings is fine for slides
+    modified: str = ""
+    ga: str = ""               # GA/available date if present
+
+def _is_tag(x: Any) -> bool:
+    return isinstance(x, Bs4Tag)
+
+def _as_tag(x: Any) -> Optional[Bs4Tag]:
+    return x if isinstance(x, Bs4Tag) else None
+
+def safe_text(x: Any) -> str:
+    """Get visible text from Tag/NavigableString/other safely."""
+    if x is None:
+        return ""
+    if isinstance(x, (Bs4Tag, Bs4Nav)):
+        try:
+            return x.get_text(" ", strip=True)
+        except Exception:
+            return str(x).strip()
+    return str(x).strip()
+
+def attr_str(tag: Optional[Bs4Tag], key: str) -> str:
+    """Return attribute as string; handles list-valued attributes."""
+    if not _is_tag(tag):
+        return ""
+    val = tag.get(key)  # type: ignore[attr-defined]
+    if val is None:
+        return ""
+    if isinstance(val, list):
+        return " ".join([str(v) for v in val])
+    return str(val)
+
+def find_one(scope: Bs4Tag, name: Any = None, **kwargs: Any) -> Optional[Bs4Tag]:
+    """BeautifulSoup find() but always returns Tag or None."""
+    try:
+        return _as_tag(scope.find(name, **kwargs))  # type: ignore[no-untyped-call]
+    except Exception:
+        return None
+
+def find_all_tags(scope: Bs4Tag, name: Any = None, **kwargs: Any) -> List[Bs4Tag]:
+    """BeautifulSoup find_all() but filtered to Tag instances."""
+    try:
+        return [t for t in scope.find_all(name, **kwargs) if _is_tag(t)]  # type: ignore[no-untyped-call]
+    except Exception:
+        return []
+
+def first_or_none(seq: Iterable[Any]) -> Optional[Any]:
+    for x in seq:
+        return x
+    return None
+
+def _clean(s: Optional[str]) -> str:
+    if not s:
+        return ""
+    # collapse whitespace, strip control chars
+    s = re.sub(r"\s+", " ", s).strip()
+    # prevent weird NBSPs etc.
+    return s.replace("\u00A0", " ")
+
+def clamp(s: str, max_len: int) -> str:
+    if len(s) <= max_len:
+        return s
+    return s[: max(0, max_len - 1)].rstrip() + "…"
+
+def map_phase_to_status(phase_text: str) -> str:
+    k = _clean(phase_text).lower()
+    for key, val in PHASE_TO_STATUS_MAP.items():
+        if key in k:
+            return val
+    return _clean(phase_text)  # fallback: return original string
+
+def normalize_item(i: Item, month_fallback: str = "") -> Item:
+    """Ensure required fields, map synonyms, fill lists, trim for layout."""
+    i.title = clamp(_clean(i.title), 140)
+    i.summary = _clean(i.summary)
+    i.description = _clean(i.description)
+    i.roadmap_id = _clean(i.roadmap_id)
+    i.url = _clean(i.url)
+
+    # month
+    if not _clean(i.month):
+        i.month = _clean(month_fallback)
+
+    # status from phases if missing
+    if not _clean(i.status) and _clean(i.phases):
+        i.status = map_phase_to_status(i.phases)
+
+    # products list should include primary product
+    if _clean(i.product) and _clean(" ".join(i.products)) == "":
+        i.products = [i.product]
+    elif _clean(i.product) and i.product not in i.products:
+        i.products.insert(0, i.product)
+
+    # audience normalize (accept string or list upstream)
+    i.audience = [a for a in (i.audience or []) if _clean(a)]
+    i.platforms = [p for p in (i.platforms or []) if _clean(p)]
+    i.clouds = [c for c in (i.clouds or []) if _clean(c)]
+
+    return i
+
+# ---------- REPORTING HELPERS ----------
+def write_parse_report(items: List[Item], out_dir: str) -> str:
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "last_parse_report.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"Parse report ({_dt.datetime.now().isoformat(timespec='seconds')}):\n")
+        f.write(f"Total items: {len(items)}\n\n")
+        for idx, it in enumerate(items[:10], start=1):  # show first 10
+            f.write(f"[{idx}] {it.title}\n")
+            f.write(f"    ID: {it.roadmap_id} | Status: {it.status} | Month: {it.month}\n")
+            f.write(f"    Product: {it.product} | Products: {', '.join(it.products)}\n")
+            f.write(f"    Platforms: {', '.join(it.platforms)} | Audience: {', '.join(it.audience)}\n")
+            f.write(f"    URL: {it.url}\n\n")
+    return path
+
+def write_items_csv(items: List[Item], path: str) -> str:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    cols = [
+        "title","summary","description","roadmap_id","url","month",
+        "product","products","platforms","audience","clouds",
+        "status","phases","created","modified","ga",
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as fp:
+        w = csv.writer(fp)
+        w.writerow(cols)
+        for it in items:
+            row = asdict(it)
+            row["products"] = ";".join(row.get("products", []) or [])
+            row["platforms"] = ";".join(row.get("platforms", []) or [])
+            row["audience"] = ";".join(row.get("audience", []) or [])
+            row["clouds"] = ";".join(row.get("clouds", []) or [])
+            w.writerow([row.get(k, "") for k in cols])
+    return path
+
 
 
 # ----------------------------
@@ -321,327 +577,120 @@ STATUS_WORDS = [
 AUDIENCE_WORDS = ["Admin", "Administrator", "IT Admin", "End user", "User", "Developer"]
 
 
-def parse_html_items(paths: list[str]) -> list[Item]:
-    items: list[Item] = []
-    for p in paths:
-        if not os.path.exists(p):
-            continue
-        with open(p, encoding="utf-8", errors="ignore") as f:
-            html = f.read()
-        soup = BeautifulSoup(html, "lxml")
+def _mk_item(**kwargs) -> Item:
+    filtered = {k: v for k, v in kwargs.items() if k in _allowed_fields}
+    return Item(**filtered)  # type: ignore[call-arg]
 
-        # Try common containers for cards
-        candidates: list[Tag] = []
-        candidates.extend(soup.select(".card, .roadmap-card, li.roadmap-item, article"))
-        if not candidates:
-            # fallback: any element that looks like an item with a title link
-            candidates.extend(
-                [a.parent for a in soup.select("h3 a, h4 a") if isinstance(a.parent, Tag)]
-            )
-
-        for card in candidates:
-            try:
-                # Title + URL
-                a = card.select_one("h3 a, h4 a, a.title, .title a")
-                title = _clean(a.get_text() if a else _clean(card.get("data-title")))
-                href_val: Any = a.get("href") if (a and a.has_attr("href")) else ""
-                if isinstance(href_val, list):
-                    href_val = href_val[0] if href_val else ""
-                elif isinstance(href_val, tuple):
-                    href_val = href_val[0] if href_val else ""
-                url = _clean(href_val)
-
-                # Summary / description
-                summary = ""
-                sCand = card.select_one(".summary, .description, p")
-                if sCand:
-                    summary = _clean(sCand.get_text())
-
-                # Roadmap/Feature ID
-                text_all = _clean(card.get_text(" "))
-                rid = ""
-                m = re.search(r"(?:Feature\s*ID|Roadmap\s*ID)\s*[:#]?\s*(\d{4,7})", text_all, re.I)
-                if m:
-                    rid = m.group(1)
-
-                # Month / date
-                month = ""
-                m2 = re.search(
-                    r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
-                    r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|"
-                    r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}",
-                    text_all,
-                    re.I,
-                )
-                if m2:
-                    month = m2.group(0).title()
-
-                # Status
-                status = ""
-                for w in STATUS_WORDS:
-                    if re.search(rf"\b{re.escape(w)}\b", text_all, re.I):
-                        status = w
-                        break
-
-                # Audience
-                audience = ""
-                for w in AUDIENCE_WORDS:
-                    if re.search(rf"\b{re.escape(w)}\b", text_all, re.I):
-                        audience = "Admin" if "admin" in w.lower() else "End user"
-                        break
-
-                # Product (chips/badges) or from title "Product: Feature"
-                product = ""
-                chip = card.select_one(".product, .technology, .category, .badge")
-                if chip:
-                    product = _clean(chip.get_text())
-                prod_from_title, clean_title = smart_split_product_title(title)
-                if prod_from_title and not product:
-                    product = prod_from_title
-                    title = clean_title
-
-                # Notes (long body) for speaker notes
-                # Grab more verbose area if present
-                long = ""
-                longCand = card.select_one(".details, .notes, .content, .body")
-                if longCand:
-                    long = _clean(longCand.get_text())
-                else:
-                    # fallback: use full text minus the summary if present
-                    if summary and text_all:
-                        long = text_all
-
-                # Date (as text string) — often similar to month but keep both
-                date_str = ""
-                m3 = re.search(
-                    r"\b(?:Updated|Created|Published)\s*[:\-]?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})",
-                    text_all,
-                    re.I,
-                )
-                if m3:
-                    date_str = m3.group(1)
-
-                items.append(
-                    Item(
-                        title=title or "(Untitled)",
-                        summary=summary or "",
-                        product=product or "",
-                        month=month or "",
-                        status=status or "",
-                        roadmap_id=rid or "",
-                        url=url or "",
-                        audience=audience or "",
-                        date_str=date_str or month or "",
-                        notes=long or "",
-                    )
-                )
-            except Exception:
-                # keep going if a single card is malformed
-                continue
-
-    # Deduplicate by (title, roadmap_id) conservatively
-    dedup: dict[tuple[str, str], Item] = {}
-    for it in items:
-        key = (it.title.lower(), it.roadmap_id)
-        dedup[key] = it
-    return list(dedup.values())
-
-
-
-def _parse_mc_cards(root) -> list[Item]:
-    """
-    Parse card-style Message Center HTML into a list[Item].
-    - Tries to be resilient to different class names and layouts.
-    - Uses only local helpers: safe_find_all, safe_find, _txt, _attr, _clean.
-    - Adapts to your Item dataclass at runtime (filters kwargs to match signature).
-    """
-    import re
-    from inspect import signature
-
-    items: list[Item] = []
-
-    # Dynamically match Item signature to avoid "unknown parameter" errors
+def _classes(node) -> list[str]:
+    c = None
     try:
-        _allowed_fields = set(signature(Item).parameters.keys())
+        c = node.get("class")
     except Exception:
-        _allowed_fields = {
-            "title", "summary", "roadmap_id", "url", "month",
-            "products", "platforms", "status", "audience",
-            "phases", "clouds", "created", "modified", "ga",
-        }
+        pass
+    if not c:
+        return []
+    if isinstance(c, str):
+        return c.split()
+    if isinstance(c, (list, tuple, set)):
+        return [str(x) for x in c]
+    return [str(c)]
 
-    def _mk_item(**kwargs) -> Item:
-        filtered = {k: v for k, v in kwargs.items() if k in _allowed_fields}
-        return Item(**filtered)  # type: ignore[call-arg]
+def _find_url(card) -> str:
+    for a in safe_find_all(card, "a", href=True):
+        href = _attr(a, "href") or ""
+        if re.search(r"(featureid=|\broadmap\b|\bmicrosoft-365-roadmap\b)", href, re.I):
+            return href
+    a0 = safe_find(card, "a", href=True)
+    return (_attr(a0, "href") or "") if a0 else ""
 
-    def _classes(node) -> list[str]:
-        c = None
-        try:
-            c = node.get("class")
-        except Exception:
-            pass
-        if not c:
-            return []
-        if isinstance(c, str):
-            return c.split()
-        if isinstance(c, (list, tuple, set)):
-            return [str(x) for x in c]
-        return [str(c)]
-
-    def _find_url(card) -> str:
-        for a in safe_find_all(card, "a", href=True):
-            href = _attr(a, "href") or ""
-            if re.search(r"(featureid=|\broadmap\b|\bmicrosoft-365-roadmap\b)", href, re.I):
-                return href
-        a0 = safe_find(card, "a", href=True)
-        return (_attr(a0, "href") or "") if a0 else ""
-
-    def _find_title(card) -> str:
-        # Prefer headings
-        for h in ("h1", "h2", "h3", "h4"):
-            htag = safe_find(card, h)
-            if htag:
-                t = _txt(htag)
-                if t:
-                    return t
-        # Next, any element with role=heading or strong/b
-        role_h = safe_find(card, attrs={"role": "heading"})
-        if role_h:
-            t = _txt(role_h)
+def _find_title(card) -> str:
+    # Prefer headings
+    for h in ("h1", "h2", "h3", "h4"):
+        htag = safe_find(card, h)
+        if htag:
+            t = _txt(htag)
             if t:
                 return t
-        sb = safe_find(card, "strong") or safe_find(card, "b")
-        if sb:
-            t = _txt(sb)
-            if t:
-                return t
-        # Fallback to first link text or the whole card text
-        a = safe_find(card, "a")
-        if a:
-            t = _txt(a)
-            if t:
-                return t
+    # Next, any element with role=heading or strong/b
+    role_h = safe_find(card, attrs={"role": "heading"})
+    if role_h:
+        t = _txt(role_h)
+        if t:
+            return t
+    sb = safe_find(card, "strong") or safe_find(card, "b")
+    if sb:
+        t = _txt(sb)
+        if t:
+            return t
+    # Fallback to first link text or the whole card text
+    a = safe_find(card, "a")
+    if a:
+        t = _txt(a)
+        if t:
+            return t
+    return _txt(card)
+
+def _longest_para(card) -> str:
+    paras = [p for p in safe_find_all(card, ["p", "div", "span"]) if _txt(p)]
+    if not paras:
         return _txt(card)
+    paras.sort(key=lambda p: len(_txt(p)), reverse=True)
+    return _txt(paras[0])
 
-    def _longest_para(card) -> str:
-        paras = [p for p in safe_find_all(card, ["p", "div", "span"]) if _txt(p)]
-        if not paras:
-            return _txt(card)
-        paras.sort(key=lambda p: len(_txt(p)), reverse=True)
-        return _txt(paras[0])
+def _find_label_value(card, label: str) -> str:
+    """
+    Find a value following a label like 'Products', 'Platforms', etc.
+    Tries multiple structures:
+        <span>Products</span><span>Excel;Teams</span>
+        <div class='field'><label>Products</label><div>Excel</div></div>
+    """
+    lab_lower = label.lower()
+    # Any tag whose text equals the label
+    for tag in safe_find_all(card, True):
+        txt = (_txt(tag) or "").strip().lower()
+        if txt == lab_lower or txt == f"{lab_lower}:":
+            # try next siblings or parent pattern
+            sib = getattr(tag, "find_next_sibling", None)
+            if callable(sib):
+                nxt = tag.find_next_sibling()
+                if nxt:
+                    val = _txt(nxt)
+                    if val:
+                        return val
+            parent = getattr(tag, "parent", None)
+            if parent:
+                # look for a value element within same group
+                cand = safe_find(parent, ["span", "div"])
+                if cand and cand is not tag:
+                    val = _txt(cand)
+                    if val and val.lower() != lab_lower:
+                        return val
+    # Regex scan fallback like "Products: Excel, Teams"
+    text = _txt(card) or ""
+    m = re.search(rf"\b{re.escape(label)}\s*:\s*(.+)", text, re.I)
+    if m:
+        return _clean(m.group(1))
+    return ""
 
-    def _find_label_value(card, label: str) -> str:
-        """
-        Find a value following a label like 'Products', 'Platforms', etc.
-        Tries multiple structures:
-          <span>Products</span><span>Excel;Teams</span>
-          <div class='field'><label>Products</label><div>Excel</div></div>
-        """
-        lab_lower = label.lower()
-        # Any tag whose text equals the label
-        for tag in safe_find_all(card, True):
-            txt = (_txt(tag) or "").strip().lower()
-            if txt == lab_lower or txt == f"{lab_lower}:":
-                # try next siblings or parent pattern
-                sib = getattr(tag, "find_next_sibling", None)
-                if callable(sib):
-                    nxt = tag.find_next_sibling()
-                    if nxt:
-                        val = _txt(nxt)
-                        if val:
-                            return val
-                parent = getattr(tag, "parent", None)
-                if parent:
-                    # look for a value element within same group
-                    cand = safe_find(parent, ["span", "div"])
-                    if cand and cand is not tag:
-                        val = _txt(cand)
-                        if val and val.lower() != lab_lower:
-                            return val
-        # Regex scan fallback like "Products: Excel, Teams"
-        text = _txt(card) or ""
-        m = re.search(rf"\b{re.escape(label)}\s*:\s*(.+)", text, re.I)
-        if m:
-            return _clean(m.group(1))
-        return ""
+def _find_feature_id(card) -> str:
+    # From URL first
+    url = _find_url(card)
+    m = re.search(r"[?&]featureid=(\d+)", url, re.I)
+    if m:
+        return m.group(1)
 
-    def _find_feature_id(card) -> str:
-        # From URL first
-        url = _find_url(card)
-        m = re.search(r"[?&]featureid=(\d+)", url, re.I)
-        if m:
-            return m.group(1)
+    # From labeled text "Feature ID:"
+    txt = _txt(card) or ""
+    m2 = re.search(r"\bFeature\s*ID\s*:\s*(\d+)", txt, re.I)
+    if m2:
+        return m2.group(1)
 
-        # From labeled text "Feature ID:"
-        txt = _txt(card) or ""
-        m2 = re.search(r"\bFeature\s*ID\s*:\s*(\d+)", txt, re.I)
-        if m2:
-            return m2.group(1)
+    # From any visible "RM" code-ish token like "RM123456"
+    m3 = re.search(r"\bRM(\d{4,})\b", txt, re.I)
+    if m3:
+        return m3.group(1)
 
-        # From any visible "RM" code-ish token like "RM123456"
-        m3 = re.search(r"\bRM(\d{4,})\b", txt, re.I)
-        if m3:
-            return m3.group(1)
-
-        return ""
-
-    # Collect candidate cards (divs with class token containing 'card' or starting 'ms-')
-    candidates = []
-    for node in getattr(root, "find_all", lambda *a, **k: [])(True):
-        cls = _classes(node)
-        if not cls:
-            continue
-        if any(("card" in c) or c.startswith("ms-") for c in cls):
-            candidates.append(node)
-
-    # If nothing matched, try broader: any container that has at least two anchors and some text
-    if not candidates:
-        for node in getattr(root, "find_all", lambda *a, **k: [])(True):
-            if len(list(safe_find_all(node, "a"))) >= 2 and len((_txt(node) or "").strip()) > 30:
-                candidates.append(node)
-
-    # Build items
-    for card in candidates:
-        title = _clean(_find_title(card))
-        summary = _clean(_longest_para(card))
-        url = _clean(_find_url(card))
-        rid = _clean(_find_feature_id(card))
-
-        products = _clean(_find_label_value(card, "Products"))
-        platforms = _clean(_find_label_value(card, "Platforms"))
-        audience = _clean(_find_label_value(card, "Audience"))
-        status = _clean(_find_label_value(card, "Status"))
-        phases = _clean(_find_label_value(card, "Phases") or _find_label_value(card, "Phase"))
-        clouds = _clean(_find_label_value(card, "Clouds") or _find_label_value(card, "Cloud"))
-
-        created = _clean(_find_label_value(card, "Created"))
-        modified = _clean(_find_label_value(card, "Modified"))
-        ga = _clean(_find_label_value(card, "GA"))
-
-        # Skip obvious empties
-        if not (title or summary or url or rid):
-            continue
-
-        items.append(
-            _mk_item(
-                title=title,
-                summary=summary,
-                roadmap_id=rid,
-                url=url,
-                month="",            # caller can set later if desired
-                products=products,
-                platforms=platforms,
-                status=status,
-                audience=audience,
-                phases=phases,
-                clouds=clouds,
-                created=created,
-                modified=modified,
-                ga=ga,
-            )
-        )
-
-    return items
+    return ""
 
 
 
@@ -664,24 +713,7 @@ def add_cover_slide(
     slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
     add_bg(slide, prs, assets.get("cover"))
 
-    # Title
-    sw_in = emu_to_inches(prs.slide_width)
-    left = PAGE_MARGIN_IN
-    right = PAGE_MARGIN_IN
-    top = 1.2
-    height = 1.6
-    width = max(1.0, sw_in - left - right)
-    add_title_box(
-        slide,
-        cover_title or "Technical Update Briefing",
-        left_in=left,
-        top_in=top,
-        width_in=width,
-        height_in=height,
-        font_size_pt=64,
-        bold=True,
-        color=GOLD,
-    )
+
 
     # Dates
     add_text_box(
@@ -786,182 +818,229 @@ def add_thankyou_slide(prs, assets: dict):
 
 
 def add_item_slide(
-    prs,
-    item: Item,
-    month_str: str | None,
-    assets: dict,
-    rail_width_in: float = DEFAULT_RAIL_WIDTH_IN,
-    brand_bg: str | None = None,
-):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    # Brand background first (overridable), else none
-    add_bg(slide, prs, brand_bg)
+    prs: Presentation,
+    it,
+    month_str: str = "",
+    assets: dict | None = None,
+    rail_left_in: float = 3.5,
+    rail_width_in: float = 3.5,
+) -> None:
+    """
+    Add a single roadmap/message-center item slide.
 
-    # Compute geometry
-    sw_in = emu_to_inches(prs.slide_width)
-    sh_in = emu_to_inches(prs.slide_height)
+    Expects `it` to have (best-effort):
+      - title: str
+      - summary or description: str
+      - roadmap_id or rid: str
+      - url: str
+      - status: str
+      - products: List[str]
+      - platforms: List[str]
+      - audience: str
+    """
+    assets = assets or {}
 
-    # Side rail on right
-    rail_left_in = max(0.0, sw_in - rail_width_in)
-    draw_side_rail(slide, prs, rail_left_in, rail_width_in, color=DARK_PURPLE)
+    # --- helpers -------------------------------------------------------------
+    def _emu_to_inches(emu: int) -> float:
+        # 1 inch = 914400 EMUs
+        return float(emu) / 914400.0
 
-    # Product bubble (top-left)
-    bubble_w = max(1.8, min(3.8, (sw_in - rail_width_in) * 0.35))
-    add_bubble(
-        slide,
-        item.product or "",
-        left_in=PAGE_MARGIN_IN,
-        top_in=0.6,
-        width_in=bubble_w,
-        height_in=0.55,
+    def _hex_to_rgb(s: str | None, fallback=(59, 46, 90)) -> RGBColor:
+        # default: a dark purple-ish
+        if not s:
+            r, g, b = fallback
+            return RGBColor(r, g, b)
+        ss = s.strip().lstrip("#")
+        if len(ss) == 6:
+            r = int(ss[0:2], 16)
+            g = int(ss[2:4], 16)
+            b = int(ss[4:6], 16)
+            return RGBColor(r, g, b)
+        r, g, b = fallback
+        return RGBColor(r, g, b)
+
+    def _first_nonempty(*vals: str) -> str:
+        for v in vals:
+            if v:
+                x = str(v).strip()
+                if x:
+                    return x
+        return ""
+
+    def _as_csv(x) -> str:
+        if x is None:
+            return ""
+        if isinstance(x, (list, tuple, set)):
+            return ", ".join(str(i) for i in x if i)
+        return str(x)
+
+    def _pick_title_size(t: str) -> int:
+        L = len(t)
+        # simple heuristic to avoid overflow without text measurement
+        if L <= 48:
+            return 36
+        if L <= 72:
+            return 32
+        if L <= 100:
+            return 28
+        if L <= 140:
+            return 24
+        return 22
+
+    # --- pull data from item -------------------------------------------------
+    title = _first_nonempty(getattr(it, "title", ""), getattr(it, "name", ""), "Untitled")
+    summary = _first_nonempty(getattr(it, "summary", ""), getattr(it, "description", ""))
+    rid = _first_nonempty(getattr(it, "roadmap_id", ""), getattr(it, "rid", ""))
+    url = str(getattr(it, "url", "") or "")
+    status = str(getattr(it, "status", "") or "")
+    products = getattr(it, "products", None) or []
+    platforms = getattr(it, "platforms", None) or []
+    audience = str(getattr(it, "audience", "") or "")
+
+    # --- slide geometry ------------------------------------------------------
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+    sw_in = _emu_to_inches(prs.slide_width)
+    sh_in = _emu_to_inches(prs.slide_height)
+
+    # Clamp/normalize rail metrics
+    rail_left = float(rail_left_in or 0.0)
+    rail_width = max(0.5, float(rail_width_in or 3.5))
+    rail_left = max(0.0, min(rail_left, max(0.0, sw_in - rail_width)))
+
+    content_left = rail_left + rail_width + 0.25
+    content_width = max(2.5, sw_in - content_left - 0.4)
+
+    # --- side rail rectangle -------------------------------------------------
+    rail_color = _hex_to_rgb(assets.get("rail_color") or "#3B2E5A")
+    rail = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(rail_left),
+        Inches(0.0),
+        Inches(rail_width),
+        Inches(sh_in),
     )
+    fill = rail.fill
+    fill.solid()
+    fill.fore_color.rgb = rail_color
+    rail.line.fill.background()  # no border
 
-    # Title in gold (left area width excludes rail)
-    title_left = PAGE_MARGIN_IN
-    title_top = 1.4
-    title_width = max(3.0, sw_in - rail_width_in - PAGE_MARGIN_IN - PAGE_MARGIN_IN)
-    title_height = 1.5
-    add_title_box(
-        slide,
-        item.title,
-        left_in=title_left,
-        top_in=title_top,
-        width_in=title_width,
-        height_in=title_height,
-        font_size_pt=44,
-        bold=True,
-        color=GOLD,
-        align=PP_ALIGN.LEFT,
+    # --- title ---------------------------------------------------------------
+    title_size = _pick_title_size(title)
+    tx = slide.shapes.add_textbox(
+        Inches(content_left),
+        Inches(0.6),
+        Inches(content_width),
+        Inches(1.8),
     )
+    tf = tx.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    p.text = title
+    p.font.size = Pt(title_size)
+    p.font.bold = True
+    p.font.color.rgb = RGBColor(0, 0, 0)
+    p.alignment = PP_ALIGN.LEFT
 
-    # Summary body (below title)
-    body_top = title_top + title_height + 0.2
-    body_height = max(1.0, sh_in - body_top - 1.3)
-    add_text_box(
-        slide,
-        item.summary or "",
-        left_in=PAGE_MARGIN_IN,
-        top_in=body_top,
-        width_in=title_width,
-        height_in=body_height,
-        size_pt=22,
-        color=WHITE,
-    )
-
-    # Right rail contents
-    # Status icon + text
-    icon_key = pick_status_icon_key(item.status)
-    icon_path = path_if_exists(assets.get(icon_key))
-    add_picture_safe(slide, icon_path, left_in=rail_left_in + 0.3, top_in=0.6, height_in=0.5)
-    add_text_box(
-        slide,
-        item.status or "Status unknown",
-        left_in=rail_left_in + 0.95,
-        top_in=0.63,
-        width_in=rail_width_in - 1.25,
-        height_in=0.4,
-        size_pt=18,
-        color=WHITE,
-    )
-
-    # Month/date pill
-    add_text_box(
-        slide,
-        month_str or item.month or item.date_str,
-        left_in=rail_left_in + 0.3,
-        top_in=1.25,
-        width_in=rail_width_in - 0.6,
-        height_in=0.45,
-        size_pt=20,
-        color=WHITE,
-    )
-
-    # Audience row with icons (best-effort)
-    # Expect optional assets: admin.png, user.png, check.png
-    aud_y = 1.9
-    check = path_if_exists(assets.get("check"))
-    admin_icon = path_if_exists(assets.get("admin"))
-    user_icon = path_if_exists(assets.get("user"))
-
-    # Admin
-    if admin_icon:
-        add_picture_safe(
-            slide, admin_icon, left_in=rail_left_in + 0.3, top_in=aud_y, height_in=0.35
+    # --- summary/body --------------------------------------------------------
+    if summary:
+        body = slide.shapes.add_textbox(
+            Inches(content_left),
+            Inches(2.1),
+            Inches(content_width),
+            Inches(3.3),
         )
-    add_text_box(
-        slide,
-        "Admin",
-        left_in=rail_left_in + 0.8,
-        top_in=aud_y,
-        width_in=1.2,
-        height_in=0.35,
-        size_pt=16,
-        color=WHITE,
-    )
-    if "admin" in (item.audience or "").lower() and check:
-        add_picture_safe(
-            slide, check, left_in=rail_left_in + rail_width_in - 0.7, top_in=aud_y, height_in=0.3
-        )
+        btf = body.text_frame
+        btf.clear()
+        p = btf.paragraphs[0]
+        p.text = summary
+        p.font.size = Pt(16)
+        p.font.color.rgb = RGBColor(32, 32, 32)
+        p.alignment = PP_ALIGN.LEFT
 
-    # End user
-    aud_y2 = aud_y + 0.55
-    if user_icon:
-        add_picture_safe(
-            slide, user_icon, left_in=rail_left_in + 0.3, top_in=aud_y2, height_in=0.35
-        )
-    add_text_box(
-        slide,
-        "End User",
-        left_in=rail_left_in + 0.8,
-        top_in=aud_y2,
-        width_in=1.2,
-        height_in=0.35,
-        size_pt=16,
-        color=WHITE,
-    )
-    if "user" in (item.audience or "").lower() and check:
-        add_picture_safe(
-            slide, check, left_in=rail_left_in + rail_width_in - 0.7, top_in=aud_y2, height_in=0.3
-        )
+    # --- meta on the rail ----------------------------------------------------
+    meta_left = rail_left + 0.35
+    meta_width = rail_width - 0.7
+    meta_top = 0.6
+    line_gap = 0.35
 
-    # Roadmap ID + link (bottom of rail)
-    bottom_y = sh_in - 1.1
-    add_text_box(
-        slide,
-        f"ID: {item.roadmap_id or '—'}",
-        left_in=rail_left_in + 0.3,
-        top_in=bottom_y,
-        width_in=rail_width_in - 0.6,
-        height_in=0.35,
-        size_pt=16,
-        color=WHITE,
-    )
-    add_text_box(
-        slide,
-        item.url or "",
-        left_in=rail_left_in + 0.3,
-        top_in=bottom_y + 0.4,
-        width_in=rail_width_in - 0.6,
-        height_in=0.5,
-        size_pt=12,
-        color=WHITE,
-    )
+    def _add_meta(label: str, value: str):
+        nonlocal meta_top
+        if not value:
+            return
+        box = slide.shapes.add_textbox(
+            Inches(meta_left),
+            Inches(meta_top),
+            Inches(meta_width),
+            Inches(0.35),
+        )
+        mtf = box.text_frame
+        mtf.clear()
+        # label
+        p1 = mtf.paragraphs[0]
+        p1.text = label
+        p1.font.size = Pt(12)
+        p1.font.bold = True
+        p1.font.color.rgb = RGBColor(255, 255, 255)
+        # value
+        p2 = mtf.add_paragraph()
+        p2.text = value
+        p2.font.size = Pt(12)
+        p2.font.color.rgb = RGBColor(230, 230, 230)
+        p2.space_before = Pt(1)
+        meta_top += line_gap
 
-    # Speaker notes: put the long/verbose blob
-    add_notes(slide, item.notes or item.summary or item.title)
+    _add_meta("Feature ID", rid)
+    _add_meta("Status", status)
+    _add_meta("Products", _as_csv(products))
+    _add_meta("Platforms", _as_csv(platforms))
+    _add_meta("Audience", audience)
+    _add_meta("Month", month_str or "")
+
+    if url:
+        # URL box (slightly more space)
+        box = slide.shapes.add_textbox(
+            Inches(meta_left),
+            Inches(meta_top),
+            Inches(meta_width),
+            Inches(0.45),
+        )
+        mtf = box.text_frame
+        mtf.clear()
+        p = mtf.paragraphs[0]
+        p.text = url
+        p.font.size = Pt(11)
+        p.font.color.rgb = RGBColor(200, 230, 255)
+        p.alignment = PP_ALIGN.LEFT
+        meta_top += line_gap
+
+    # --- optional watermark / brand bg on right side ------------------------
+    brand_bg = assets.get("brand_bg")
+    if brand_bg and os.path.exists(brand_bg):
+        try:
+            slide.shapes.add_picture(
+                brand_bg,
+                Inches(content_left),
+                Inches(sh_in - 1.2),
+                height=Inches(1.0),
+            )
+        except Exception:
+            # ignore image errors; we don't want to break slide creation
+            pass
+
 
 
 # ----------------------------
 # Build
 # ----------------------------
+
 def build(
-    inputs: list[str],
+    inputs: List[str],
     output_path: str,
-    month: str | None,
+    month: Optional[str],
     assets: dict,
-    template: str | None,
+    template: Optional[str],
     rail_width: float,
-    conclusion_links: list[tuple[str, str]] | None = None,
+    conclusion_links: Optional[List[tuple[str, str]]] = None,
 ):
     prs = Presentation(template) if (template and os.path.exists(template)) else Presentation()
 
@@ -976,33 +1055,60 @@ def build(
     )
     add_agenda_slide(prs, assets)
 
-    # Parse items
-    items = parse_html_items(inputs)
+    # 1) Aggregate
+    all_items: list[Item] = []
+    for path in inputs:
+        dicts = (parse_message_center_html(path, month)
+                if "messagecenter" in path.lower() or "briefing" in path.lower()
+                else parse_roadmap_html(path, month))
+        all_items.extend(_to_item(d) for d in dicts)
 
+    # 2) Dedup/sort -> this becomes the canonical 'items'
+    def _dedup_keep_order(seq: list[Item]) -> list[Item]:
+        seen: set[str] = set()
+        out: list[Item] = []
+        for it in seq:
+            key = (it.roadmap_id or it.title or it.url or "").lower().strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(it)
+        return out
+
+    items = _dedup_keep_order(all_items)
+    items.sort(key=lambda i: (i.products or "", i.title or ""))
+
+    # 3) Everything below should reference `items`
     # Optional: per-product separators before items
+    
     if items:
         # Group by product (stable order by first appearance)
-        seen = {}
-        groups: dict[str, list[Item]] = {}
+        order: List[str] = []
+        by_product: Dict[str, List[Item]] = {}
         for it in items:
-            k = (it.product or "General").strip()
-            if k not in seen:
-                seen[k] = True
-                groups[k] = []
-            groups[k].append(it)
+            prod = (it.products[0] if it.products else "General").strip() or "General"
+            if prod not in by_product:
+                by_product[prod] = []
+                order.append(prod)
+            by_product[prod].append(it)
 
-        for product, group_items in groups.items():
-            sep_title = f"{product} — {month or ''}".strip(" —")
-            add_separator_slide(prs, assets, sep_title)
-            for it in group_items:
+        # Build slides
+        idx = 1
+        for prod in order:
+            add_separator_slide(prs, assets, title=f"{prod} updates", subtitle=month or "")
+            for it in by_product[prod]:
                 add_item_slide(
                     prs,
                     it,
-                    month_str=month,
+                    month_str=month or "",
                     assets=assets,
+                    rail_left_in=rail_width,
                     rail_width_in=rail_width,
-                    brand_bg=assets.get("brand_bg"),
                 )
+                idx += 1
+    else:
+        # Fallback if no items
+        add_separator_slide(prs, assets, title="No updates found", subtitle=month or "")
 
     # Conclusion + Thank you
     if not conclusion_links:
@@ -1023,6 +1129,7 @@ def build(
 
     actual = _safe_save(prs, output_path)
     print(f"[ok] Deck saved to: {actual}")
+
 
 
 # ----------------------------
