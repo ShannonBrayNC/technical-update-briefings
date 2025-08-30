@@ -1,14 +1,15 @@
-$Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Py   = Join-Path $Here ".venv\Scripts\python.exe"
-if (-not (Test-Path $Py)) { & (Join-Path $Here "run.ps1"); exit }
+# Lightweight smoke run – useful during edits
+$Here = "c:\technical_update_briefings\technical_update_briefings\" 
+$Py   = "c:\technical_update_briefings\tools\ppt_builder\.venv\Scripts\python.exe"
+$Out   = "C:\technical_update_briefings\RoadmapDeck_SMOKE.pptx"
+$i1 = "c:\technical_update_briefings\tools\roadmap\RoadmapPrimarySource.html"
+$i2 = "c:\technical_update_briefings\tools\message_center\MessageCenterBriefingSuppliments.html"
 
-$Stamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
-$Out   = Join-Path $Here ("RoadmapDeck_SMOKE_{0}.pptx" -f $Stamp)
 
-& $Py "generate_deck.py" `
-  -i "..\tools\roadmap\RoadmapPrimarySource.html", "..\tools\message_center\MessageCenterBriefingSuppliments.html" `
-  -o "c:\technical_update_briefings\RoadmapDeck_AutoGen.pptx"`
-  --month ((Get-Date).ToString("MMMM yyyy")) `
+& $Py ("c:\\technical_update_briefings\\tools\\ppt_builder\\generate_deck.py") `
+  --i ($i1 , $i2) `
+  --o ($Out) `
+  --month ((Get-Date).ToString("09-2025")) `
   --cover (Join-Path $Here "assets\cover.png") `
   --agenda-bg (Join-Path $Here "assets\agenda.png") `
   --separator (Join-Path $Here "assets\separator.png") `
@@ -21,4 +22,4 @@ $Out   = Join-Path $Here ("RoadmapDeck_SMOKE_{0}.pptx" -f $Stamp)
   --logo (Join-Path $Here "assets\parex-logo.png") `
   --logo2 (Join-Path $Here "assets\customer-logo.png") `
   --rocket (Join-Path $Here "assets\rocket.png") `
-  --magnifier (Join-Path $Here "assets\magnifier.png")
+  --magnifier (Join-Path $Here "assets\magnifier.png") `

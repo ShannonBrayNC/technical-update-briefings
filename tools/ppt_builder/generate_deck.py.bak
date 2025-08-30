@@ -35,19 +35,8 @@ PAGE_MARGIN_IN = 0.6
 # ----------------------------
 # Utils
 # ----------------------------
-EMU_PER_INCH = 914400  # python-pptx constant
-
-def emu_to_inches(x: int | float | None) -> float:
-    """Convert EMU to inches; None -> 0.0."""
-    if x is None:
-        return 0.0
-    return float(x) / EMU_PER_INCH
-
-def inches_to_emu(x: float | int | None) -> int:
-    """Convert inches to EMU; None -> 0.0."""
-    if x is None:
-        return 0
-    return int(round(float(x) * EMU_PER_INCH))
+def emu_to_inches(emu_val: int) -> float:
+    return float(emu_val) / EMU_PER_INCH
 
 
 def _to_text(val: Any) -> str:
@@ -63,17 +52,6 @@ def _to_text(val: Any) -> str:
     if isinstance(val, Sequence) and not isinstance(val, (str, bytes, bytearray)):
          return ", ".join(_to_text(v) for v in val if v is not None)
     return str(val)
-
-# after: from pptx.util import Inches, Pt
-from typing import Optional
-
-def _inches(x: Optional[float]) -> int:
-    """Return EMU from inches, accepting None by coercing to 0.0."""
-    return _inches(0.0 if x is None else float(x))
-
-def _pt(x: Optional[float]) -> int:
-    """Return EMU from points, accepting None by coercing to 0.0."""
-    return Pt(0.0 if x is None else float(x))
 
 
 def _clean(s: Any) -> str:
@@ -125,16 +103,16 @@ def add_picture_safe(
     """Add picture if file is present. width_in/height_in are optional (Inches)."""
     if not image_path or not os.path.exists(image_path):
         return None
-    left = _inches(left_in)
-    top = _inches(top_in)
+    left = Inches(left_in)
+    top = Inches(top_in)
     if width_in is None and height_in is None:
         return slide.shapes.add_picture(image_path, left, top)
     if width_in is not None and height_in is None:
-        return slide.shapes.add_picture(image_path, left, top, width=_inches(width_in))
+        return slide.shapes.add_picture(image_path, left, top, width=Inches(width_in))
     if width_in is None and height_in is not None:
-        return slide.shapes.add_picture(image_path, left, top, height=_inches(height_in))
+        return slide.shapes.add_picture(image_path, left, top, height=Inches(height_in))
     return slide.shapes.add_picture(
-        image_path, left, top, width=_inches(width_in), height=_inches(height_in)
+        image_path, left, top, width=Inches(width_in), height=Inches(height_in)
     )
 
 
@@ -153,16 +131,16 @@ def add_title_box(
 ):
     """Title that wraps & shrinks to fit."""
     box = slide.shapes.add_textbox(
-        _inches(left_in), _inches(top_in), _inches(width_in), _inches(height_in)
+        Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
     )
     tf = box.text_frame
     tf.clear()
     tf.word_wrap = True
     tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
-    tf.margin_left = _inches(0.05)
-    tf.margin_right = _inches(0.05)
-    tf.margin_top = _inches(0.02)
-    tf.margin_bottom = _inches(0.02)
+    tf.margin_left = Inches(0.05)
+    tf.margin_right = Inches(0.05)
+    tf.margin_top = Inches(0.02)
+    tf.margin_bottom = Inches(0.02)
     p = tf.paragraphs[0]
     p.alignment = align
     r = p.add_run()
@@ -188,7 +166,7 @@ def add_text_box(
     align=PP_ALIGN.LEFT,
 ):
     box = slide.shapes.add_textbox(
-        _inches(left_in), _inches(top_in), _inches(width_in), _inches(height_in)
+        Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
     )
     tf = box.text_frame
     tf.clear()
@@ -220,10 +198,10 @@ def draw_side_rail(
     slide_h_in = emu_to_inches(prs.slide_height)
     shape = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
-        _inches(rail_left_in),
-        _inches(0.0),
-        _inches(rail_width_in),
-        _inches(slide_h_in),
+        Inches(rail_left_in),
+        Inches(0.0),
+        Inches(rail_width_in),
+        Inches(slide_h_in),
     )
     fill = shape.fill
     fill.solid()
@@ -236,10 +214,10 @@ def add_bubble(slide, text: str, left_in: float, top_in: float, width_in: float,
     """Rounded rectangle bubble for product/technology."""
     shape = slide.shapes.add_shape(
         MSO_SHAPE.ROUNDED_RECTANGLE,
-        _inches(left_in),
-        _inches(top_in),
-        _inches(width_in),
-        _inches(height_in),
+        Inches(left_in),
+        Inches(top_in),
+        Inches(width_in),
+        Inches(height_in),
     )
     fill = shape.fill
     fill.solid()
@@ -445,205 +423,6 @@ def parse_html_items(paths: list[str]) -> list[Item]:
         key = (it.title.lower(), it.roadmap_id)
         dedup[key] = it
     return list(dedup.values())
-
-
-
-def _parse_mc_cards(root) -> list[Item]:
-    """
-    Parse card-style Message Center HTML into a list[Item].
-    - Tries to be resilient to different class names and layouts.
-    - Uses only local helpers: safe_find_all, safe_find, _txt, _attr, _clean.
-    - Adapts to your Item dataclass at runtime (filters kwargs to match signature).
-    """
-    import re
-    from inspect import signature
-
-    items: list[Item] = []
-
-    # Dynamically match Item signature to avoid "unknown parameter" errors
-    try:
-        _allowed_fields = set(signature(Item).parameters.keys())
-    except Exception:
-        _allowed_fields = {
-            "title", "summary", "roadmap_id", "url", "month",
-            "products", "platforms", "status", "audience",
-            "phases", "clouds", "created", "modified", "ga",
-        }
-
-    def _mk_item(**kwargs) -> Item:
-        filtered = {k: v for k, v in kwargs.items() if k in _allowed_fields}
-        return Item(**filtered)  # type: ignore[call-arg]
-
-    def _classes(node) -> list[str]:
-        c = None
-        try:
-            c = node.get("class")
-        except Exception:
-            pass
-        if not c:
-            return []
-        if isinstance(c, str):
-            return c.split()
-        if isinstance(c, (list, tuple, set)):
-            return [str(x) for x in c]
-        return [str(c)]
-
-    def _find_url(card) -> str:
-        for a in safe_find_all(card, "a", href=True):
-            href = _attr(a, "href") or ""
-            if re.search(r"(featureid=|\broadmap\b|\bmicrosoft-365-roadmap\b)", href, re.I):
-                return href
-        a0 = safe_find(card, "a", href=True)
-        return (_attr(a0, "href") or "") if a0 else ""
-
-    def _find_title(card) -> str:
-        # Prefer headings
-        for h in ("h1", "h2", "h3", "h4"):
-            htag = safe_find(card, h)
-            if htag:
-                t = _txt(htag)
-                if t:
-                    return t
-        # Next, any element with role=heading or strong/b
-        role_h = safe_find(card, attrs={"role": "heading"})
-        if role_h:
-            t = _txt(role_h)
-            if t:
-                return t
-        sb = safe_find(card, "strong") or safe_find(card, "b")
-        if sb:
-            t = _txt(sb)
-            if t:
-                return t
-        # Fallback to first link text or the whole card text
-        a = safe_find(card, "a")
-        if a:
-            t = _txt(a)
-            if t:
-                return t
-        return _txt(card)
-
-    def _longest_para(card) -> str:
-        paras = [p for p in safe_find_all(card, ["p", "div", "span"]) if _txt(p)]
-        if not paras:
-            return _txt(card)
-        paras.sort(key=lambda p: len(_txt(p)), reverse=True)
-        return _txt(paras[0])
-
-    def _find_label_value(card, label: str) -> str:
-        """
-        Find a value following a label like 'Products', 'Platforms', etc.
-        Tries multiple structures:
-          <span>Products</span><span>Excel;Teams</span>
-          <div class='field'><label>Products</label><div>Excel</div></div>
-        """
-        lab_lower = label.lower()
-        # Any tag whose text equals the label
-        for tag in safe_find_all(card, True):
-            txt = (_txt(tag) or "").strip().lower()
-            if txt == lab_lower or txt == f"{lab_lower}:":
-                # try next siblings or parent pattern
-                sib = getattr(tag, "find_next_sibling", None)
-                if callable(sib):
-                    nxt = tag.find_next_sibling()
-                    if nxt:
-                        val = _txt(nxt)
-                        if val:
-                            return val
-                parent = getattr(tag, "parent", None)
-                if parent:
-                    # look for a value element within same group
-                    cand = safe_find(parent, ["span", "div"])
-                    if cand and cand is not tag:
-                        val = _txt(cand)
-                        if val and val.lower() != lab_lower:
-                            return val
-        # Regex scan fallback like "Products: Excel, Teams"
-        text = _txt(card) or ""
-        m = re.search(rf"\b{re.escape(label)}\s*:\s*(.+)", text, re.I)
-        if m:
-            return _clean(m.group(1))
-        return ""
-
-    def _find_feature_id(card) -> str:
-        # From URL first
-        url = _find_url(card)
-        m = re.search(r"[?&]featureid=(\d+)", url, re.I)
-        if m:
-            return m.group(1)
-
-        # From labeled text "Feature ID:"
-        txt = _txt(card) or ""
-        m2 = re.search(r"\bFeature\s*ID\s*:\s*(\d+)", txt, re.I)
-        if m2:
-            return m2.group(1)
-
-        # From any visible "RM" code-ish token like "RM123456"
-        m3 = re.search(r"\bRM(\d{4,})\b", txt, re.I)
-        if m3:
-            return m3.group(1)
-
-        return ""
-
-    # Collect candidate cards (divs with class token containing 'card' or starting 'ms-')
-    candidates = []
-    for node in getattr(root, "find_all", lambda *a, **k: [])(True):
-        cls = _classes(node)
-        if not cls:
-            continue
-        if any(("card" in c) or c.startswith("ms-") for c in cls):
-            candidates.append(node)
-
-    # If nothing matched, try broader: any container that has at least two anchors and some text
-    if not candidates:
-        for node in getattr(root, "find_all", lambda *a, **k: [])(True):
-            if len(list(safe_find_all(node, "a"))) >= 2 and len((_txt(node) or "").strip()) > 30:
-                candidates.append(node)
-
-    # Build items
-    for card in candidates:
-        title = _clean(_find_title(card))
-        summary = _clean(_longest_para(card))
-        url = _clean(_find_url(card))
-        rid = _clean(_find_feature_id(card))
-
-        products = _clean(_find_label_value(card, "Products"))
-        platforms = _clean(_find_label_value(card, "Platforms"))
-        audience = _clean(_find_label_value(card, "Audience"))
-        status = _clean(_find_label_value(card, "Status"))
-        phases = _clean(_find_label_value(card, "Phases") or _find_label_value(card, "Phase"))
-        clouds = _clean(_find_label_value(card, "Clouds") or _find_label_value(card, "Cloud"))
-
-        created = _clean(_find_label_value(card, "Created"))
-        modified = _clean(_find_label_value(card, "Modified"))
-        ga = _clean(_find_label_value(card, "GA"))
-
-        # Skip obvious empties
-        if not (title or summary or url or rid):
-            continue
-
-        items.append(
-            _mk_item(
-                title=title,
-                summary=summary,
-                roadmap_id=rid,
-                url=url,
-                month="",            # caller can set later if desired
-                products=products,
-                platforms=platforms,
-                status=status,
-                audience=audience,
-                phases=phases,
-                clouds=clouds,
-                created=created,
-                modified=modified,
-                ga=ga,
-            )
-        )
-
-    return items
-
-
 
 
 # ----------------------------

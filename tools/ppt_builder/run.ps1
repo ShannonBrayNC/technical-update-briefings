@@ -1,146 +1,132 @@
-# tools/ppt_builder/run.ps1
-[CmdletBinding()]
-param(
-  [string]$Config = "$PSScriptRoot\deck.config.json",
-  [switch]$NoVenv,
-  [switch]$NoPip,
-  [switch]$WhatIf
-)
+<#
+Run this from anywhere:
+
+  PS C:\technical_update_briefings> .\tools\ppt_builder\run.ps1
+
+It will:
+  - Create/upgrade a local venv in tools\ppt_builder\.venv
+  - Install python-pptx + HTML libs into that venv
+  - Build a timestamped deck from the local HTML inputs and assets
+#>
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = "Stop"
 
-function Resolve-From($baseDir, $p) {
-  if ([string]::IsNullOrWhiteSpace($p)) { return $null }
-  if ([System.IO.Path]::IsPathRooted($p)) { return $p }
-  return (Join-Path -Path $baseDir -ChildPath $p)
-}
+# Resolve script folder (tools\ppt_builder)
+$Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+Push-Location $Here
 
-function Must-Exist($label, $path, [switch]$Optional) {
-  if ([string]::IsNullOrWhiteSpace($path)) {
-    if ($Optional) { return $null }
-    throw "Missing $label path."
-  }
-  if (-not (Test-Path -LiteralPath $path)) {
-    if ($Optional) {
-      Write-Verbose "Optional $label not found: $path"
-      return $null
+try {
+  # --- VENV BOOTSTRAP ---
+  $VenvDir = Join-Path $Here ".venv"
+  $PyExe   = Join-Path $VenvDir "Scripts\python.exe"
+
+  if (-not (Test-Path $PyExe)) {
+    Write-Host "Creating venv in $VenvDir ..."
+    # prefer 3.12 to match pptx ecosystem stability
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+      py -3.12 -m venv $VenvDir
+    } else {
+      Write-Host "Python launcher 'py' not found. Falling back to 'python'..."
+      python -m venv $VenvDir
     }
-    throw "$label not found: $path"
   }
-  return (Resolve-Path -LiteralPath $path).Path
-}
 
-# 1) Load config (as hashtable so we can check keys safely)
-if (-not (Test-Path -LiteralPath $Config)) { throw "Config file not found: $Config" }
-$ConfigPath = (Resolve-Path -LiteralPath $Config).Path
-$ConfigDir  = Split-Path -Parent $ConfigPath
-$cfg = (Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json -AsHashtable)
+  # Upgrade pip + install deps *into this venv*
+  & $PyExe -m pip install --upgrade pip
+  & $PyExe -m pip install python-pptx beautifulsoup4 lxml Pillow XlsxWriter
 
-# 2) Resolve and validate inputs/output relative to the config location
-$inputs = @()
-foreach ($raw in @($cfg.Inputs)) {
-  $abs = Resolve-From $ConfigDir $raw
-  $inputs += (Must-Exist "Input" $abs)
-}
-if ($inputs.Count -eq 0) { throw "No Inputs provided in config." }
+  # Sanity check the interpreter really imports from this venv
+  & $PyExe - << 'PY'
+import sys
+print("python =", sys.executable)
+try:
+  import pptx, bs4, lxml
+  from PIL import Image
+  import xlsxwriter
+  print("IMPORT_OK")
+except Exception as e:
+  raise SystemExit("IMPORT_FAILED: %r" % (e,))
+'PY'
 
-$output = Resolve-From $ConfigDir $cfg.Output
-if ([string]::IsNullOrWhiteSpace($output)) { throw "Output not provided in config." }
-$null = New-Item -Path (Split-Path -Parent $output) -ItemType Directory -Force -ErrorAction SilentlyContinue
+  # --- INPUTS & ASSETS (repo-relative) ---
+  $Inputs = @()
+  $primary = Join-Path $Here "RoadmapPrimarySource.html"
+  if (Test-Path $primary) { $Inputs += $primary }
 
-# 3) Optional assets & strings
-$cover        = Must-Exist "Cover"        (Resolve-From $ConfigDir $cfg.Cover)        -Optional
-$agendaBg     = Must-Exist "AgendaBg"     (Resolve-From $ConfigDir $cfg.AgendaBg)     -Optional
-$separator    = Must-Exist "Separator"    (Resolve-From $ConfigDir $cfg.Separator)    -Optional
-$conclusionBg = Must-Exist "ConclusionBg" (Resolve-From $ConfigDir $cfg.ConclusionBg) -Optional
-$thankyou     = Must-Exist "ThankYou"     (Resolve-From $ConfigDir $cfg.ThankYou)     -Optional
-$brandBg      = Must-Exist "BrandBg"      (Resolve-From $ConfigDir $cfg.BrandBg)      -Optional
-$logo         = Must-Exist "Logo"         (Resolve-From $ConfigDir $cfg.Logo)         -Optional
-$logo2        = Must-Exist "Logo2"        (Resolve-From $ConfigDir $cfg.Logo2)        -Optional
-$rocket       = Must-Exist "Rocket"       (Resolve-From $ConfigDir $cfg.Rocket)       -Optional
-$magnifier    = Must-Exist "Magnifier"    (Resolve-From $ConfigDir $cfg.Magnifier)    -Optional
-$template     = Must-Exist "Template"     (Resolve-From $ConfigDir $cfg.Template)     -Optional
+  $msgCenter = Join-Path $Here "MessageCenterBriefingSuppliments.html"
+  if (Test-Path $msgCenter) { $Inputs += $msgCenter }
 
-$month         = [string]$cfg.Month
-$coverTitle    = [string]$cfg.CoverTitle
-$coverDates    = [string]$cfg.CoverDates
-$separatorTitle= [string]$cfg.SeparatorTitle
-$railWidth     = if ($cfg.RailWidth) { [string]$cfg.RailWidth } else { $null }
-
-# 4) Python selection + venv bootstrap
-$scriptDir  = $PSScriptRoot
-$venvPy     = Join-Path $scriptDir ".venv\Scripts\python.exe"
-$python     = $null
-
-if (-not $NoVenv -and (Test-Path -LiteralPath $venvPy)) {
-  $python = $venvPy
-} else {
-  $python = "python"
-}
-
-Write-Verbose "Python => $python"
-if (-not $NoPip) {
-  try {
-    & $python -m pip --version | Out-Null
-  } catch {
-    Write-Warning "pip check failed; continuing"
+  if ($Inputs.Count -eq 0) {
+    throw "No inputs found. Expected RoadmapPrimarySource.html and/or MessageCenterBriefingSuppliments.html in tools\ppt_builder."
   }
-}
 
-# 5) Requirements (optional)
-$req = Join-Path $scriptDir "requirements.txt"
-if (-not $NoPip -and (Test-Path -LiteralPath $req)) {
-  Write-Host "Ensuring Python deps (requirements.txt)..." -ForegroundColor Cyan
-  & $python -m pip install -r $req
-}
+  $AssetsDir = Join-Path $Here "assets"
+  function A($name) { Join-Path $AssetsDir $name }
 
-# 6) Build argument list for generate_deck.py
-$gen = (Must-Exist "generate_deck.py" (Join-Path $scriptDir "generate_deck.py"))
-$args = @($gen, "-i") + $inputs + @("-o", $output)
+  $Cover        = A "cover.png"
+  $AgendaBg     = A "agenda.png"
+  $Separator    = A "separator.png"
+  $ConclusionBg = A "conclusion.png"
+  $ThankYou     = A "thankyou.png"
+  $BrandBg      = A "brand_bg.png"         # optional plain brand swatch
+  $Logo1        = A "parex-logo.png"
+  $Logo2        = A "customer-logo.png"    # optional
+  $Rocket       = A "rocket.png"
+  $Magnifier    = A "magnifier.png"
+  $AdminIcon    = A "admin.png"
+  $UserIcon     = A "user.png"
+  $CheckIcon    = A "check.png"
 
-function Add-Flag($name, $val) {
-  if ($null -ne $val -and $val -ne "") {
-    $script:args += @($name, $val)
+  # Month label – defaults to current if you don’t override
+  $MonthLabel = (Get-Date).ToString("MMMM yyyy")
+
+  # Output path – timestamped to dodge “file in use” locks
+  $Stamp   = (Get-Date).ToString("yyyyMMdd_HHmmss")
+  $OutFile = Join-Path $Here ("RoadmapDeck_{0}.pptx" -f $Stamp)
+
+  # Optional: template fallback (must exist to be used)
+  $Template = Join-Path $Here "RoadmapDeck_Sample_Refined.pptx"
+  $UseTemplate = (Test-Path $Template)
+
+  # --- BUILD ---
+  $args = @(
+    "generate_deck.py",
+    "-i"
+  ) + $Inputs + @(
+    "-o", $OutFile,
+    "--month", $MonthLabel,
+    "--cover", $Cover,
+    "--agenda-bg", $AgendaBg,
+    "--separator", $Separator,
+    "--conclusion-bg", $ConclusionBg,
+    "--thankyou", $ThankYou,
+    "--brand-bg", $BrandBg,
+    "--cover-title", "M365 Technical Update Briefing",
+    "--cover-dates", $MonthLabel,
+    "--separator-title", "Technical Update Briefing — $MonthLabel",
+    "--logo", $Logo1,
+    "--logo2", $Logo2,
+    "--rocket", $Rocket,
+    "--magnifier", $Magnifier,
+    "--admin", $AdminIcon,
+    "--user", $UserIcon,
+    "--check", $CheckIcon
+  )
+
+  if ($UseTemplate) {
+    $args += @("--template", $Template)
   }
+
+  Write-Host "`nRunning deck generator..."
+  & $PyExe @args
+
+  if (-not (Test-Path $OutFile)) {
+    throw "Deck generation finished but output not found: $OutFile"
+  }
+
+  Write-Host "`nSUCCESS: $OutFile"
 }
-Add-Flag "--month"          $month
-Add-Flag "--cover-title"    $coverTitle
-Add-Flag "--cover-dates"    $coverDates
-Add-Flag "--separator-title"$separatorTitle
-Add-Flag "--cover"          $cover
-Add-Flag "--agenda-bg"      $agendaBg
-Add-Flag "--separator"      $separator
-Add-Flag "--conclusion-bg"  $conclusionBg
-Add-Flag "--thankyou"       $thankyou
-Add-Flag "--brand-bg"       $brandBg
-Add-Flag "--logo"           $logo
-Add-Flag "--logo2"          $logo2
-Add-Flag "--rocket"         $rocket
-Add-Flag "--magnifier"      $magnifier
-Add-Flag "--template"       $template
-Add-Flag "--rail-width"     $railWidth
-
-# 7) Self-check
-Write-Host "=== Deck build self-check ===" -ForegroundColor Yellow
-"{0,-18} {1}" -f "Config:", $ConfigPath
-"{0,-18} {1}" -f "Inputs:", ($inputs -join "; ")
-"{0,-18} {1}" -f "Output:", $output
-"{0,-18} {1}" -f "Month:", $month
-"{0,-18} {1}" -f "Template:", ($template ?? "<none>")
-"{0,-18} {1}" -f "RailWidth:", ($railWidth ?? "<default>")
-"{0,-18} {1}" -f "Cover/Agenda:", (($cover ?? "<none>") + " / " + ($agendaBg ?? "<none>"))
-"{0,-18} {1}" -f "Separator:", ($separator ?? "<none>")
-"{0,-18} {1}" -f "Conclusion/Thanks:", (($conclusionBg ?? "<none>") + " / " + ($thankyou ?? "<none>"))
-"{0,-18} {1}" -f "Logos:", (($logo ?? "<none>") + " / " + ($logo2 ?? "<none>"))
-"{0,-18} {1}" -f "Icons:", (($rocket ?? "<none>") + " / " + ($magnifier ?? "<none>"))
-Write-Host "==============================`n"
-
-if ($WhatIf) {
-  Write-Host "[WhatIf] Would run:" -ForegroundColor DarkCyan
-  Write-Host ("`n{0} {1}`n" -f $python, ($args | ForEach-Object { '"{0}"' -f ($_ -replace '"','\"') }) -join ' ')
-  return
+finally {
+  Pop-Location
 }
-
-# 8) Run
-& $python @args

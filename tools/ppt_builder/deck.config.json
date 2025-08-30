@@ -3,7 +3,7 @@
     "..\\roadmap\\RoadmapPrimarySource.html",
     "..\\message_center\\MessageCenterBriefingSuppliments.html"
   ],
-  "Output": ".\\RoadmapDeck_AutoGen.pptx",
+  "Output": "..\\RoadmapDeck_AutoGen.pptx",
   "Month": "September 2025",
   "CoverTitle": "M365 Technical Update Briefing",
   "CoverDates": "September 2025",

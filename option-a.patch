@@ -1,0 +1,52 @@
+diff --git a/tools/ppt_builder/generate_deck.py b/tools/ppt_builder/generate_deck.py
+index 0000000..1111111 100644
+--- a/tools/ppt_builder/generate_deck.py
++++ b/tools/ppt_builder/generate_deck.py
+@@ -1,20 +1,38 @@
+ # [imports and existing helpers above remain unchanged]
+ 
+ # existing helper: _txt(x) -> str
+ # existing helper: _clean(s: str | None) -> str
+ # existing helper: _attr(tag, name) -> str
+ # existing helper: safe_find / safe_find_all, etc.
+ 
++def _first_seq(val: Any) -> Any:
++    """
++    Return the first element if `val` is a non-empty list/tuple, else return `val`.
++    Keeps bs4 attribute handling predictable across str | list[str] | tuple[str, ...].
++    """
++    if isinstance(val, list):
++        return val[0] if val else ""
++    if isinstance(val, tuple):
++        return val[0] if val else ""
++    return val
++
+ # ... (other code) ...
+ 
+ def _parse_mc_cards(root: Tag) -> List[Item]:
+     items: List[Item] = []
+     # locate likely card containers, iterate, etc...
+     for card in safe_find_all(root, ["div", "section", "article"]):
+         # title / anchor discovery up above ...
+         a = card.find("a")
+-        href_val: Any = a.get("href") if (a and a.has_attr("href")) else ""
+-        if isinstance(href_val, list):
+-            href_val = href_val[0] if href_val else ""
+-        elif isinstance(href_val, tuple):
+-            href_val = href_val[0] if href_val else ""
+-        url = _clean(href_val)
++        href_val: Any = a.get("href") if (a and a.has_attr("href")) else ""
++        url = _clean(_first_seq(href_val))
+ 
+-        # Summary / description
+-        summary = ""
+-        sCand = card.select_one(".summary, .description, p")
+-        if sCand:
+-            summary = _clean(sCand.get_text())
++        # Summary / description (normalize whitespace via _txt)
++        s_node = card.select_one(".summary, .description, p")
++        summary = _txt(s_node) if s_node else ""
+ 
+         # ... continue building the Item with cleaned fields ...
+         # items.append(Item(...))
+         # end for card
