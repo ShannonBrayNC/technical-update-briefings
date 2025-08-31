@@ -2,22 +2,60 @@
 from pptx import Presentation
 from style_manager import load_style
 import os, json, re, difflib, importlib.util
-from typing import Dict, List
+from typing import Dict, List, Optional
 import slides as S
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.dml.color import RGBColor
+from pptx.util import Inches
+from typing import cast
+
 
 # --- force local parsers.py (avoid shadowing) ---
 from pathlib import Path as _Path
 HERE = _Path(__file__).resolve().parent
 PARSERS_PATH = HERE / "parsers.py"
-_pspec = importlib.util.spec_from_file_location("parsers_local", str(PARSERS_PATH))
-P = importlib.util.module_from_spec(_pspec)
-_pspec.loader.exec_module(P)
+spec = importlib.util.spec_from_file_location("parsers_local", str(PARSERS_PATH))
+if not spec or not spec.loader:
+    raise ImportError(f"Cannot load parsers.py at {PARSERS_PATH}")
+P = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(P)
 parse_message_center_html = P.parse_message_center_html
 parse_roadmap_html = P.parse_roadmap_html
 # ------------------------------------------------
 
+
+
+def overlap(a: Optional[List[str]], b: Optional[List[str]]) -> bool:
+    return bool(set(a or []).intersection(set(b or [])))
+
+
+
+def _status_icon_for(status: str, assets: dict) -> str | None:
+    s = (status or "").lower()
+    if "ga" in s or "rolling out" in s:
+        return assets.get("icon_rocket") or ""
+    if "preview" in s or "in development" in s:
+        return assets.get("icon_preview") or ""
+    return ""
+
+
+
+
+# Pick a rail color from the first product (fallback to navy)
+def _rail_color_for(products) -> str:
+    p = (products or [""])[0].lower()
+    palette = {
+        "teams":      "5B21B6",  # purple
+        "sharepoint": "065F46",  # teal
+        "onedrive":   "1D4ED8",  # blue
+        "exchange":   "0F172A",  # navy
+        "security":   "14532D",  # green
+        "outlook":    "1F2937",  # slate
+        "defender":   "14532D",
+        "purview":    "065F46",
+        "entra":      "1D4ED8",
+    }
+    return palette.get(p, "0F172A")
 
 
 def _add_rail(slide, rail_width_in: float = 3.5, hex_color: str = "0F172A"):
@@ -30,6 +68,7 @@ def _add_rail(slide, rail_width_in: float = 3.5, hex_color: str = "0F172A"):
     shp.fill.solid()
     shp.fill.fore_color.rgb = RGBColor.from_string(hex_color)
     shp.line.fill.background()
+
 
 
 def _titlecase(s: str) -> str:
@@ -189,8 +228,10 @@ def _merge_items(items: List[dict]) -> List[dict]:
     return out
 
 
-def _build_item_slide(prs, item, month: str, assets: dict, rail_width: float | None = None):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    def _build_item_slide(prs, item, month: str, assets: dict,
+                      rail_width: float | None = None,
+                      page: int | None = None, total: int | None = None):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
 
     from os.path import basename
     bg = assets.get("brand_bg") or assets.get("cover") or ""
@@ -198,21 +239,46 @@ def _build_item_slide(prs, item, month: str, assets: dict, rail_width: float | N
 
 
     # background (note: underscore, not space)
-    S.add_full_slide_picture(slide, prs, assets.get("brand_bg") or assets.get("cover"))
+    bg_path: str = cast(str, assets.get("brand_bg") or assets.get("cover") or "")
+    S.add_full_slide_picture(slide, prs, bg_path)
+
 
     # optional right rail
+    rail_hex = _rail_color_for(item.get("products"))
     if rail_width:
-        _add_rail(slide, rail_width_in=float(rail_width), hex_color="0F172A")
+        _add_rail(slide, rail_width_in=float(rail_width), hex_color=rail_hex)
+
+    icon_path = _status_icon_for(item.get("status"), assets)
+    if icon_path:
+        # put icon near the top-center of the rail
+        icon_w = 1.1
+        icon_h = 1.1
+        icon_left = rail_left + max(0.1, (rail_w - icon_w) / 2.0)
+        slide.shapes.add_picture(icon_path, Inches(icon_left), Inches(0.35), width=Inches(icon_w), height=Inches(icon_h))
 
     # content width respects rail
-    w_body = 8.2 if rail_width else 8.8
+    w_body = (10.0 - float(rail_width or 0) - 0.9)  # left margin 0.6 + extra 0.3
 
     raw_title = item.get("title", "") or item.get("headline","")
     title = _titlecase(raw_title)
-    S.add_title_box(slide, title,
+    from pptx.enum.text import PP_ALIGN
+
+    S.add_title_box(
+        slide, title,
         left_in=0.6, top_in=0.6, width_in=w_body, height_in=1.1,
-        font_size_pt=34, bold=True, color="FFFFFF"
+        font_size_pt=34, bold=True, color="FFFFFF", align=PP_ALIGN.CENTER
     )
+        
+    url = item.get("url")
+    if url:
+        link = slide.shapes.add_textbox(Inches(0.6), Inches(6.9), Inches(2.2), Inches(0.35))
+        tf = link.text_frame; tf.clear(); tf.word_wrap = False
+        p = tf.paragraphs[0]; r = p.add_run()
+        r.text = "Open item ↗"
+        r.font.size = Pt(12); r.font.bold = True
+        r.font.color.rgb = RGBColor(59, 130, 246)  # blue
+        r.hyperlink.address = url
+
 
     status = (item.get("status") or "").lower()
     color_map = {
@@ -222,12 +288,22 @@ def _build_item_slide(prs, item, month: str, assets: dict, rail_width: float | N
         "preview": ("F59E0B","111827"),
         "in development": ("6B7280","FFFFFF"),
     }
-    for key, (fill, fg) in color_map.items():
-        if key in status:
-            S.add_chip(slide, status.title(), left=7.0, top=0.65, fill=fill, text_color=fg)
-            break
 
 
+    # rail geometry (inches)
+    rail_w = float(rail_width or 0)
+    rail_left = 10.0 - rail_w  # slide width is 10"
+
+    # estimate chip width so we can center it; tweak if your chip gets wider
+    chip_w = 1.8
+    chip_left = rail_left + max(0.1, (rail_w - chip_w) / 2.0)
+
+
+    S.add_chip(
+        slide, status.title(),
+        left=chip_left, top=0.60,
+        fill=fill, text_color=fg
+    )
 
 
     body = item.get("summary") or item.get("description") or item.get("body") or ""
@@ -253,8 +329,31 @@ def _build_item_slide(prs, item, month: str, assets: dict, rail_width: float | N
 
 
 
+from pptx.util import Inches, Pt
 
-def build(inputs: List[str], output_path: str, month: str, assets: Dict, template: str=None, rail_width=None, conclusion_links=None, debug_dump: str|None=None):
+def _add_footer(slide, month_label: str, page: int | None, total: int | None):
+    # left: month/date
+    left = slide.shapes.add_textbox(Inches(0.6), Inches(7.05), Inches(4.0), Inches(0.35))
+    tf = left.text_frame; tf.clear()
+    p = tf.paragraphs[0]; r = p.add_run()
+    r.text = month_label or ""
+    r.font.size = Pt(10); r.font.color.rgb = RGBColor.from_string("94A3B8")
+    # right: page number
+    if page and total:
+        right = slide.shapes.add_textbox(Inches(9.2), Inches(7.05), Inches(0.9), Inches(0.35))
+        tf2 = right.text_frame; tf2.clear()
+        p2 = tf2.paragraphs[0]; r2 = p2.add_run()
+        r2.text = f"{page}/{total}"
+        r2.font.size = Pt(10); r2.font.color.rgb = RGBColor.from_string("94A3B8")
+
+
+
+
+
+
+
+
+def build(inputs: List[str], output_path: str, month: str, assets: Dict, template: str="", rail_width=None, conclusion_links=None, icon_rocket=None, icon_preview = "", debug_dump: str|None=None):
     _log(f"Starting deck build...")
 
     # Parse all inputs
@@ -287,13 +386,44 @@ def build(inputs: List[str], output_path: str, month: str, assets: Dict, templat
     S.add_cover_slide(prs, assets, assets.get("cover_title","M365 Technical Update Briefing"), assets.get("cover_dates", month or ""), assets.get("logo"), assets.get("logo2"))
     S.add_agenda_slide(prs, assets)
 
-    # group by product
+
+
+    # group items
     grouped, order = {}, []
     for it in merged_items:
         p = (it.get("products") or ["General"])[0]
-        if p not in grouped:
-            grouped[p] = []; order.append(p)
-        grouped[p].append(it)
+        grouped.setdefault(p, []).append(it)
+        if p not in order: order.append(p)
+
+    # compute total item slides
+    item_total = sum(len(v) for v in grouped.values())
+    page_counter = 0
+
+
+    # After you’ve created cover + agenda and before item slides:
+    # total slides = cover + agenda + separators + items + conclusion + thankyou
+    # Easiest: compute page on the fly using len(prs.slides)
+    for prod in order:
+        S.add_separator_slide(prs, assets, f"{prod} updates")
+        for it in grouped[prod]:
+            _build_item_slide(prs, it, month, assets, rail_width,
+                            page=len(prs.slides)+1, total=None)  # fill total later
+    # After all slides are added (just before save), fill totals for pages we set:
+    # (If you want exact totals printed, you can re-walk slides and overwrite the last textbox,
+    # or simpler: compute total early if you prefer. If “N/M” isn’t required, keep just “N”.)
+
+
+    # compute total item slides
+    item_total = sum(len(v) for v in grouped.values())
+    # we’ll show page counts only on item slides as 1..item_total
+    page_counter = 0
+    for prod in order:
+        S.add_separator_slide(prs, assets, f"{prod} updates")
+        for it in grouped[prod]:
+            page_counter += 1
+            _build_item_slide(prs, it, month, assets, rail_width,
+                            page=page_counter, total=item_total)
+
 
     if not order:
         slide = prs.slides.add_slide(prs.slide_layouts[6])
@@ -302,7 +432,10 @@ def build(inputs: List[str], output_path: str, month: str, assets: Dict, templat
         for prod in order:
             S.add_separator_slide(prs, assets, f"{prod} updates")
             for it in grouped[prod]:
-                 _build_item_slide(prs, it, month, assets, rail_width)
+                page_counter += 1
+                _build_item_slide(prs, it, month, assets, rail_width,
+                          page=page_counter, total=item_total)
+
 
     links = conclusion_links or [("Security","https://www.microsoft.com/security"),
                                  ("Azure","https://azure.microsoft.com/"),
