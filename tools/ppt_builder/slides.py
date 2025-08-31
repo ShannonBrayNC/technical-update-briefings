@@ -188,3 +188,8 @@ def add_conclusion_slide(prs, assets, links):
 def add_thankyou_slide(prs, assets):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_full_slide_picture(slide, prs, assets.get("thankyou"))
+
+def add_item_slide(self, prs, item, month_str, assets, rail_left_in=0, rail_width_in=3):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        # Implement item slide
+        pass

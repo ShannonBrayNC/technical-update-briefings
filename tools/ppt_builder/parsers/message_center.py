@@ -5,8 +5,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from bs4 import BeautifulSoup
-
+from bs4 import BeautifulSoup, Tag
+from bs4.element import NavigableString
+from collections.abc import Sequence
 
 ItemDict = Dict[str, Any]
 
@@ -23,18 +24,26 @@ def _clean(s: Any) -> str:
     return txt
 
 
-def _to_text(x: Any) -> str:
-    # Avoid importing bs4 types for annotations; keep Pylance chill
-    if x is None:
+def _to_text(element):
+    """
+    Convert a BeautifulSoup element, list, or string to a plain string.
+    Handles nested lists, tags, strings, and None gracefully.
+    """
+    if element is None:
         return ""
-    # bs4 Tag/NS both support get_text; use duck typing
-    get_text = getattr(x, "get_text", None)
-    if callable(get_text):
-        try:
-            return get_text(" ", strip=True)
-        except Exception:
-            pass
-    return _clean(x)
+    elif isinstance(element, NavigableString):
+        return str(element).strip()
+    elif isinstance(element, Tag):
+        return element.get_text(strip=True)
+    elif isinstance(element, str):
+        return element.strip()
+    elif isinstance(element, Sequence):
+        # process each item recursively and join
+        return " ".join(_to_text(e) for e in element).strip()
+    else:
+        # fallback
+        return str(element).strip()
+
 
 
 def _safe_find_all(node: Any, *args: Any, **kwargs: Any) -> List[Any]:

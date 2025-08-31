@@ -21,16 +21,29 @@ def _clean(s: Any) -> str:
     return s
 
 
-def _to_text(x: Any) -> str:
-    if x is None:
+from bs4 import  Tag
+from bs4.element import NavigableString
+from collections.abc import Sequence
+
+def _to_text(element):
+    """
+    Convert a BeautifulSoup element, list, or string to a plain string.
+    Handles nested lists, tags, strings, and None gracefully.
+    """
+    if element is None:
         return ""
-    get_text = getattr(x, "get_text", None)
-    if callable(get_text):
-        try:
-            return get_text(" ", strip=True)
-        except Exception:
-            pass
-    return _clean(x)
+    elif isinstance(element, NavigableString):
+        return str(element).strip()
+    elif isinstance(element, Tag):
+        return element.get_text(strip=True)
+    elif isinstance(element, str):
+        return element.strip()
+    elif isinstance(element, Sequence):
+        # process each item recursively and join
+        return " ".join(_to_text(e) for e in element).strip()
+    else:
+        # fallback
+        return str(element).strip()
 
 
 def _safe_find(node: Any, *args: Any, **kwargs: Any) -> Optional[Any]:
@@ -43,17 +56,32 @@ def _safe_find(node: Any, *args: Any, **kwargs: Any) -> Optional[Any]:
         return None
 
 
-def _safe_find_all(node: Any, *args: Any, **kwargs: Any) -> List[Any]:
-    fn = getattr(node, "find_all", None)
-    if not callable(fn):
+
+
+from bs4.element import Tag
+from typing import List, Optional, Dict, Union
+
+def _safe_find_all(
+    element: Union[Tag, object],
+    name: Optional[Union[str, List[str]]] = None,
+    attrs: Optional[Dict[str, Union[str, List[str]]]] = None,
+    recursive: bool = True
+) -> List[Tag]:
+    """
+    Safely find all elements matching criteria, returning an empty list if the input
+    isn't a Tag or if an error occurs.
+    """
+    if not isinstance(element, Tag):
         return []
+
     try:
-        out = fn(*args, **kwargs) or []
-        return list(out)
-    except Exception:
+        return [
+            tag for tag in element.find_all(name, attrs=attrs, recursive=recursive)
+            if isinstance(tag, Tag)
+        ]
+    except TypeError:
+        # fallback if attrs is an invalid type
         return []
-
-
 def _attr(node: Any, name: str) -> str:
     if node is None:
         return ""
