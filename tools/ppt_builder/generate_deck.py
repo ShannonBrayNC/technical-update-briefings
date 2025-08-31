@@ -17,7 +17,11 @@ from pptx.enum.text import PP_ALIGN, MSO_AUTO_SIZE
 from pptx.util import Inches, Pt
 
 # Import custom parsers
+# Import your custom modules
+from style_manager import load_style
+from layout import Layout
 from parsers import parse_message_center_html, parse_roadmap_html
+from slides import add_cover_slide, add_agenda_slide.add_separator_slide, add_conclusion_slide, add_thankyou_slide, add_item_slide
 
 # Constants & theme
 EMU_PER_INCH = 914400
@@ -670,36 +674,65 @@ def build(
 # =========================
 # CLI Entry Point
 # =========================
+
 def main():
-    parser = argparse.ArgumentParser(description="Generate a PowerPoint briefing deck from HTML inputs.")
-    parser.add_argument("-i", "--inputs", nargs="+", required=True, help="Paths to input HTML files (Roadmap / Message Center)")
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(
+        description="Generate a themed PowerPoint deck from HTML inputs."
+    )
+    parser.add_argument("-i", "--inputs", nargs="+", required=True, help="Input HTML files")
     parser.add_argument("-o", "--output", required=True, help="Output PPTX filename")
-    parser.add_argument("--month", default="", help="Month label, e.g., 'September 2025'")
-    
+    parser.add_argument(
+        "--style",
+        default="style_template.yaml",
+        help="Path to style YAML configuration (default: style_template.yaml)",
+    )
+    parser.add_argument(
+        "--month",
+        default="",
+        help="Month label for slides, e.g., 'October 2024'",
+    )
+
     # Asset images
     parser.add_argument("--cover", default="", help="Background image for cover slide")
     parser.add_argument("--agenda-bg", dest="agenda", default="", help="Background for agenda slide")
     parser.add_argument("--separator", default="", help="Background for separator slides")
-    parser.add_argument("--conclusion-bg", dest="conclusion", default="", help="Background for conclusion slide")
+    parser.add_argument(
+        "--conclusion-bg",
+        dest="conclusion",
+        default="",
+        help="Background for conclusion slide",
+    )
     parser.add_argument("--thankyou", default="", help="Background for thank-you slide")
     parser.add_argument("--brand-bg", default="", help="Background for item slides (brand)")
-    parser.add_argument("--cover-title", default="M365 Technical Update Briefing", help="Cover slide title text")
+    parser.add_argument(
+        "--cover-title",
+        default="M365 Technical Update Briefing",
+        help="Cover slide title",
+    )
     parser.add_argument("--cover-dates", default="", help="Cover slide date text")
     parser.add_argument("--logo", default="", help="Path to primary logo image")
     parser.add_argument("--logo2", default="", help="Path to secondary logo image")
-    
-    # Styling options
-    parser.add_argument("--rail-width", default=str(DEFAULT_RAIL_WIDTH_IN), help="Rail width in inches (default 3.5)")
-    
-    # Optional PPTX template
-    parser.add_argument("--template", default="", help="Path to a PPTX template to use")
-    
+    parser.add_argument("--rail-width", default=str(DEFAULT_RAIL_WIDTH_IN), help="Rail width in inches")
+    parser.add_argument("--template", default="", help="Path to a PPTX template (optional)")
+
     args = parser.parse_args()
 
-    # Prepare assets dict, only include existing files
-    def path_if_exists(p: str) -> str:
+    # Load style configuration
+    def load_style(path):
+        import yaml
+        with open(path, 'r') as f:
+            return yaml.safe_load(f)
+
+    style_cfg = load_style(args.style)
+
+    # Helper to verify paths
+    def path_if_exists(p):
         return p if p and os.path.exists(p) else ""
 
+    # Assets dictionary
     assets = {
         "cover": path_if_exists(args.cover),
         "agenda": path_if_exists(args.agenda),
@@ -713,12 +746,14 @@ def main():
         "logo2": path_if_exists(args.logo2),
     }
 
+    # Convert rail width to float
     try:
         rail_w = float(args.rail_width)
     except ValueError:
         rail_w = DEFAULT_RAIL_WIDTH_IN
 
-    # Call build with all parameters
+    # Call your build function
+    from build import build  # assuming your build method is in 'build.py'
     build(
         inputs=args.inputs,
         output_path=args.output,
@@ -726,8 +761,10 @@ def main():
         assets=assets,
         template=args.template,
         rail_width=rail_w,
-        conclusion_links=None,  # Can be customized to provide specific links
+        conclusion_links=None,  # or pass custom links list
     )
+
+
 
 if __name__ == "__main__":
     main()

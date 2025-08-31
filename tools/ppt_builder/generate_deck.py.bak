@@ -4,116 +4,132 @@ import argparse
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from typing import Any
+from typing import Any, List, Dict, Optional
 
 from bs4 import BeautifulSoup
-from bs4.element import NavigableString, Tag
+from bs4.element import Tag, NavigableString
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
+from pptx.enum.text import PP_ALIGN, MSO_AUTO_SIZE
 from pptx.util import Inches, Pt
 
-# ----------------------------
-# Constants / theme
-# ----------------------------
+# Import custom parsers
+from parsers import parse_message_center_html, parse_roadmap_html
+
+# Constants & theme
 EMU_PER_INCH = 914400
-
-GOLD = RGBColor(212, 175, 55)
-WHITE = RGBColor(255, 255, 255)
-BLACK = RGBColor(0, 0, 0)
-DARK_PURPLE = RGBColor(40, 17, 63)  # rail
-MID_PURPLE = RGBColor(70, 35, 100)
-LIGHT_PURPLE = RGBColor(95, 60, 135)
-
 DEFAULT_RAIL_WIDTH_IN = 3.5
 PAGE_MARGIN_IN = 0.6
 
+# Colors
+GOLD = RGBColor(212, 175, 55)
+WHITE = RGBColor(255, 255, 255)
+BLACK = RGBColor(0, 0, 0)
+DARK_PURPLE = RGBColor(40, 17, 63)
+MID_PURPLE = RGBColor(70, 35, 100)
 
-# ----------------------------
-# Utils
-# ----------------------------
-def emu_to_inches(emu_val: int) -> float:
-    return float(emu_val) / EMU_PER_INCH
+# Utility functions
+def emu_to_inches(x: int | float | None) -> float:
+    return (float(x) / EMU_PER_INCH) if x is not None else 0.0
 
+def inches_to_emu(x: float | int | None) -> int:
+    return int(round(float(x) * EMU_PER_INCH)) if x is not None else 0
+
+def _txt(x: Any) -> str:
+    try:
+        return x.get_text(strip=True)  # type: ignore[attr-defined]
+    except Exception:
+        return "" if x is None else str(x)
+
+def _attr(x: Any, name: str) -> str:
+    try:
+        v = x.get(name)
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v
+        try:
+            return " ".join(v)
+        except Exception:
+            return str(v)
+    except Exception:
+        return ""
+
+def first(el: Any, css: str) -> Any:
+    try:
+        return el.select_one(css)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+def all_of(el: Any, css: str) -> List[Any]:
+    try:
+        res = el.select(css)  # type: ignore[attr-defined]
+        return list(res) if res else []
+    except Exception:
+        return []
+
+    # normalize string fields
+    for k in ("title", "summary", "url", "roadmap_id", "status", "month"):
+        v = data.get(k)
+        data[k] = "" if v is None else str(v)
+
+    # normalize list-ish fields
+    list_fields = ("products", "platforms", "audience", "phases", "clouds")
+    for k in list_fields:
+        v = data.get(k)
+        if v is None:
+            data[k] = []
+        elif isinstance(v, (list, tuple, set)):
+            data[k] = [str(x) for x in v if x is not None]
+        else:
+            data[k] = [str(v)]
+
+    # optional date fields as strings
+    for k in ("created", "modified", "ga"):
+        v = data.get(k)
+        if v is None:
+            data[k] = ""
+        else:
+            data[k] = str(v)
+
+    return Item(**data)
 
 def _to_text(val: Any) -> str:
-    """Turn bs4 values (str | list[str] | Tag | NavigableString | None) into text."""
     if val is None:
         return ""
-    if isinstance(val, NavigableString,):
+    if isinstance(val, NavigableString):
         return str(val)
     if isinstance(val, Tag):
         return val.get_text(" ", strip=True)
     from collections.abc import Sequence
-    # treat true sequences but not text-like
     if isinstance(val, Sequence) and not isinstance(val, (str, bytes, bytearray)):
-         return ", ".join(_to_text(v) for v in val if v is not None)
+        return ", ".join(_to_text(v) for v in val if v is not None)
     return str(val)
 
+def _inches(x: Optional[float]) -> int:
+    return inches_to_emu(x)
 
-def _clean(s: Any) -> str:
-    return re.sub(r"\s+", " ", _to_text(s)).strip()
+def _pt(x: Optional[float]) -> int:
+    return Pt(0 if x is None else float(x))
 
-
-def smart_split_product_title(title: str) -> tuple[str, str]:
-    """
-    If title is like 'Product: Feature name', return ('Product', 'Feature name').
-    Otherwise return ('', title).
-    """
-    if not title:
-        return "", ""
-    m = re.match(r"^\s*([^:]{2,50})\s*:\s*(.+)$", title)
-    if m:
-        prod = m.group(1).strip()
-        rest = m.group(2).strip()
-        return prod, rest
-    return "", title.strip()
-
-
-def pick_status_icon_key(status_text: str) -> str:
-    """
-    Choose 'rocket' for GA/Launched/Rolling out; 'magnifier' for Preview/In development/Planned.
-    Default to 'magnifier' when uncertain.
-    """
-    s = (status_text or "").lower()
-    if any(k in s for k in ["launched", "rolling out", "rolled out", "general availability", "ga"]):
-        return "rocket"
-    if any(k in s for k in ["preview", "in development", "planned", "beta"]):
-        return "magnifier"
-    return "magnifier"
-
-
-def path_if_exists(p: str | None) -> str | None:
-    if p and os.path.exists(p):
-        return p
-    return None
-
-
-def add_picture_safe(
-    slide,
-    image_path: str | None,
-    left_in: float,
-    top_in: float,
-    width_in: float | None = None,
-    height_in: float | None = None,
-):
-    """Add picture if file is present. width_in/height_in are optional (Inches)."""
-    if not image_path or not os.path.exists(image_path):
+def safe_find(node, name, **kwargs):
+    if not isinstance(node, Tag):
         return None
-    left = Inches(left_in)
-    top = Inches(top_in)
-    if width_in is None and height_in is None:
-        return slide.shapes.add_picture(image_path, left, top)
-    if width_in is not None and height_in is None:
-        return slide.shapes.add_picture(image_path, left, top, width=Inches(width_in))
-    if width_in is None and height_in is not None:
-        return slide.shapes.add_picture(image_path, left, top, height=Inches(height_in))
-    return slide.shapes.add_picture(
-        image_path, left, top, width=Inches(width_in), height=Inches(height_in)
-    )
+    try:
+        return node.find(name, **kwargs)
+    except Exception:
+        return None
+
+def safe_find_all(node, name, **kwargs):
+    if not isinstance(node, Tag):
+        return []
+    try:
+        return [t for t in node.find_all(name, **kwargs) if isinstance(t, Tag)]
+    except Exception:
+        return []
 
 
 def add_title_box(
@@ -131,16 +147,16 @@ def add_title_box(
 ):
     """Title that wraps & shrinks to fit."""
     box = slide.shapes.add_textbox(
-        Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
+        _inches(left_in), _inches(top_in), _inches(width_in), _inches(height_in)
     )
     tf = box.text_frame
     tf.clear()
     tf.word_wrap = True
     tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
-    tf.margin_left = Inches(0.05)
-    tf.margin_right = Inches(0.05)
-    tf.margin_top = Inches(0.02)
-    tf.margin_bottom = Inches(0.02)
+    tf.margin_left = _inches(0.05)
+    tf.margin_right = _inches(0.05)
+    tf.margin_top = _inches(0.02)
+    tf.margin_bottom = _inches(0.02)
     p = tf.paragraphs[0]
     p.alignment = align
     r = p.add_run()
@@ -152,56 +168,66 @@ def add_title_box(
     return box
 
 
-def add_text_box(
-    slide,
-    text: str,
-    *,
-    left_in: float,
-    top_in: float,
-    width_in: float,
-    height_in: float,
-    size_pt: int = 18,
-    bold: bool = False,
-    color: RGBColor = WHITE,
-    align=PP_ALIGN.LEFT,
-):
-    box = slide.shapes.add_textbox(
-        Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
-    )
-    tf = box.text_frame
+def add_picture_safe(slide, image_path: str | None, left_in: float, top_in: float, width_in: float | None = None, height_in: float | None = None):
+    if not image_path or not os.path.exists(image_path):
+        return None
+    try:
+        left = inches_to_emu(left_in)
+        top = inches_to_emu(top_in)
+        width = inches_to_emu(width_in) if width_in is not None else None
+        height = inches_to_emu(height_in) if height_in is not None else None
+        if width is None and height is None:
+            return slide.shapes.add_picture(image_path, left, top)
+        elif width is not None and height is None:
+            return slide.shapes.add_picture(image_path, left, top, width=width)
+        elif width is None and height is not None:
+            return slide.shapes.add_picture(image_path, left, top, height=height)
+        else:
+            return slide.shapes.add_picture(image_path, left, top, width=width, height=height)
+    except Exception as e:
+        print(f"Error adding picture {image_path}: {e}")
+        return None
+
+# Add a textbox with styling
+def add_text_box(slide, text: str, *, left_in: float, top_in: float, width_in: float, height_in: float,
+                 font_size_pt: int = 18, bold: bool = False, color: RGBColor = WHITE, align=PP_ALIGN.LEFT):
+    textbox = slide.shapes.add_textbox(inches_to_emu(left_in), inches_to_emu(top_in), inches_to_emu(width_in), inches_to_emu(height_in))
+    tf = textbox.text_frame
     tf.clear()
     tf.word_wrap = True
+    tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    tf.margin_left = inches_to_emu(0.05)
+    tf.margin_right = inches_to_emu(0.05)
+    tf.margin_top = inches_to_emu(0.02)
+    tf.margin_bottom = inches_to_emu(0.02)
     p = tf.paragraphs[0]
     p.alignment = align
     r = p.add_run()
     r.text = text or ""
-    f = r.font
-    f.size = Pt(size_pt)
-    f.bold = bold
-    f.color.rgb = color
-    return box
+    r.font.size = Pt(font_size_pt)
+    r.font.bold = bold
+    r.font.color.rgb = color
+    return textbox
 
 
+
+# Add background image stretched to full slide
 def add_full_slide_picture(slide, prs, image_path: str | None):
-    """Stretch a background image to full slide; ignore if missing."""
     if not image_path or not os.path.exists(image_path):
         return
-    sw = emu_to_inches(prs.slide_width)
-    sh = emu_to_inches(prs.slide_height)
-    add_picture_safe(slide, image_path, left_in=0.0, top_in=0.0, width_in=sw, height_in=sh)
+    width_in = emu_to_inches(prs.slide_width)
+    height_in = emu_to_inches(prs.slide_height)
+    add_picture_safe(slide, image_path, 0, 0, width_in, height_in)
 
-
-def draw_side_rail(
-    slide, prs, rail_left_in: float, rail_width_in: float, color: RGBColor = DARK_PURPLE
-):
-    """Right-side vertical rail rectangle, sized using the Presentation dimensions."""
+# Draw vertical side rail
+def draw_side_rail(slide, prs, rail_left_in: float, rail_width_in: float, color: RGBColor = DARK_PURPLE):
     slide_h_in = emu_to_inches(prs.slide_height)
     shape = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
-        Inches(rail_left_in),
-        Inches(0.0),
-        Inches(rail_width_in),
-        Inches(slide_h_in),
+        inches_to_emu(rail_left_in),
+        0,
+        inches_to_emu(rail_width_in),
+        inches_to_emu(slide_h_in),
     )
     fill = shape.fill
     fill.solid()
@@ -209,15 +235,13 @@ def draw_side_rail(
     shape.line.fill.background()
     return shape
 
-
 def add_bubble(slide, text: str, left_in: float, top_in: float, width_in: float, height_in: float):
-    """Rounded rectangle bubble for product/technology."""
     shape = slide.shapes.add_shape(
         MSO_SHAPE.ROUNDED_RECTANGLE,
-        Inches(left_in),
-        Inches(top_in),
-        Inches(width_in),
-        Inches(height_in),
+        inches_to_emu(left_in),
+        inches_to_emu(top_in),
+        inches_to_emu(width_in),
+        inches_to_emu(height_in),
     )
     fill = shape.fill
     fill.solid()
@@ -259,232 +283,101 @@ def _safe_save(prs, output_path: str, tries: int = 4, delay_sec: float = 0.6) ->
         except PermissionError:
             time.sleep(delay_sec)
             continue
+    # Final attempt
     prs.save(output_path)
     return output_path
 
 
-# ----------------------------
-# Data model
-# ----------------------------
+# =========================
+# Data models and parsing helpers
+# =========================
+
+# Core Item dataclass
 @dataclass
 class Item:
-    title: str
-    summary: str
-    product: str
-    month: str
-    status: str
-    roadmap_id: str
-    url: str
-    audience: str  # "Admin", "End user", etc.
-    date_str: str
-    notes: str
+    title: str = ""
+    summary: str = ""
+    description: str = ""
+    roadmap_id: str = ""
+    url: str = ""
+    month: str = ""
+    product: str = ""
+    products: List[str] = field(default_factory=list)
+    platforms: List[str] = field(default_factory=list)
+    audience: List[str] = field(default_factory=list)
+    clouds: List[str] = field(default_factory=list)
+    status: str = ""
+    phases: str = ""
+    created: str = ""
+    modified: str = ""
+    ga: str = ""
 
 
-# ----------------------------
-# HTML parsing
-# ----------------------------
-STATUS_WORDS = [
-    "Launched",
-    "Rolling out",
-    "General Availability",
-    "GA",
-    "Preview",
-    "Public Preview",
-    "Private Preview",
-    "In development",
-    "Planned",
-    "Beta",
-]
-
-AUDIENCE_WORDS = ["Admin", "Administrator", "IT Admin", "End user", "User", "Developer"]
-
-
-def parse_html_items(paths: list[str]) -> list[Item]:
-    items: list[Item] = []
-    for p in paths:
-        if not os.path.exists(p):
-            continue
-        with open(p, encoding="utf-8", errors="ignore") as f:
-            html = f.read()
-        soup = BeautifulSoup(html, "lxml")
-
-        # Try common containers for cards
-        candidates: list[Tag] = []
-        candidates.extend(soup.select(".card, .roadmap-card, li.roadmap-item, article"))
-        if not candidates:
-            # fallback: any element that looks like an item with a title link
-            candidates.extend(
-                [a.parent for a in soup.select("h3 a, h4 a") if isinstance(a.parent, Tag)]
-            )
-
-        for card in candidates:
-            try:
-                # Title + URL
-                a = card.select_one("h3 a, h4 a, a.title, .title a")
-                title = _clean(a.get_text() if a else _clean(card.get("data-title")))
-                href_val: Any = a.get("href") if (a and a.has_attr("href")) else ""
-                if isinstance(href_val, list):
-                    href_val = href_val[0] if href_val else ""
-                elif isinstance(href_val, tuple):
-                    href_val = href_val[0] if href_val else ""
-                url = _clean(href_val)
-
-                # Summary / description
-                summary = ""
-                sCand = card.select_one(".summary, .description, p")
-                if sCand:
-                    summary = _clean(sCand.get_text())
-
-                # Roadmap/Feature ID
-                text_all = _clean(card.get_text(" "))
-                rid = ""
-                m = re.search(r"(?:Feature\s*ID|Roadmap\s*ID)\s*[:#]?\s*(\d{4,7})", text_all, re.I)
-                if m:
-                    rid = m.group(1)
-
-                # Month / date
-                month = ""
-                m2 = re.search(
-                    r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
-                    r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|"
-                    r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}",
-                    text_all,
-                    re.I,
-                )
-                if m2:
-                    month = m2.group(0).title()
-
-                # Status
-                status = ""
-                for w in STATUS_WORDS:
-                    if re.search(rf"\b{re.escape(w)}\b", text_all, re.I):
-                        status = w
-                        break
-
-                # Audience
-                audience = ""
-                for w in AUDIENCE_WORDS:
-                    if re.search(rf"\b{re.escape(w)}\b", text_all, re.I):
-                        audience = "Admin" if "admin" in w.lower() else "End user"
-                        break
-
-                # Product (chips/badges) or from title "Product: Feature"
-                product = ""
-                chip = card.select_one(".product, .technology, .category, .badge")
-                if chip:
-                    product = _clean(chip.get_text())
-                prod_from_title, clean_title = smart_split_product_title(title)
-                if prod_from_title and not product:
-                    product = prod_from_title
-                    title = clean_title
-
-                # Notes (long body) for speaker notes
-                # Grab more verbose area if present
-                long = ""
-                longCand = card.select_one(".details, .notes, .content, .body")
-                if longCand:
-                    long = _clean(longCand.get_text())
-                else:
-                    # fallback: use full text minus the summary if present
-                    if summary and text_all:
-                        long = text_all
-
-                # Date (as text string) — often similar to month but keep both
-                date_str = ""
-                m3 = re.search(
-                    r"\b(?:Updated|Created|Published)\s*[:\-]?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})",
-                    text_all,
-                    re.I,
-                )
-                if m3:
-                    date_str = m3.group(1)
-
-                items.append(
-                    Item(
-                        title=title or "(Untitled)",
-                        summary=summary or "",
-                        product=product or "",
-                        month=month or "",
-                        status=status or "",
-                        roadmap_id=rid or "",
-                        url=url or "",
-                        audience=audience or "",
-                        date_str=date_str or month or "",
-                        notes=long or "",
-                    )
-                )
-            except Exception:
-                # keep going if a single card is malformed
-                continue
-
-    # Deduplicate by (title, roadmap_id) conservatively
-    dedup: dict[tuple[str, str], Item] = {}
-    for it in items:
-        key = (it.title.lower(), it.roadmap_id)
-        dedup[key] = it
-    return list(dedup.values())
+# Helper to create Item from dict
+def _to_item(d: dict[str, Any]) -> Item:
+    return Item(
+        title=str(d.get("title", "")),
+        summary=str(d.get("summary", "")),
+        description=str(d.get("description", "")),
+        roadmap_id=str(d.get("roadmap_id", "")),
+        url=str(d.get("url", "")),
+        month=str(d.get("month", "")),
+        product=str(d.get("product", "")),
+        products=list(d.get("products", [])),
+        platforms=list(d.get("platforms", [])),
+        audience=list(d.get("audience", [])),
+        clouds=list(d.get("clouds", [])),
+        status=str(d.get("status", "")),
+        phases=str(d.get("phases", "")),
+        created=str(d.get("created", "")),
+        modified=str(d.get("modified", "")),
+        ga=str(d.get("ga", "")),
+    )
 
 
 # ----------------------------
 # Slide builders
 # ----------------------------
-def add_bg(slide, prs, image_path: str | None):
-    add_full_slide_picture(slide, prs, image_path)
 
-
-def add_cover_slide(
-    prs,
-    assets: dict,
-    cover_title: str | None,
-    cover_dates: str | None,
-    logo1: str | None,
-    logo2: str | None,
-):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
-    add_bg(slide, prs, assets.get("cover"))
-
-    # Title
-    sw_in = emu_to_inches(prs.slide_width)
-    left = PAGE_MARGIN_IN
-    right = PAGE_MARGIN_IN
-    top = 1.2
-    height = 1.6
-    width = max(1.0, sw_in - left - right)
+def add_cover_slide(prs, assets, cover_title, cover_dates, logo1_path, logo2_path):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
+    add_full_slide_picture(slide, prs, assets.get("cover"))
+    # Add title text
     add_title_box(
         slide,
-        cover_title or "Technical Update Briefing",
-        left_in=left,
-        top_in=top,
-        width_in=width,
-        height_in=height,
-        font_size_pt=64,
-        bold=True,
+        cover_title or "Title",
+        left_in=PAGE_MARGIN_IN,
+        top_in=2,
+        width_in=10,
+        height_in=2,
+        font_size_pt=52,
         color=GOLD,
+        align=PP_ALIGN.CENTER,
     )
+    # Add dates
+    if cover_dates:
+        add_text_box(
+            slide,
+            cover_dates,
+            left_in=PAGE_MARGIN_IN,
+            top_in=4,
+            width_in=10,
+            height_in=1,
+            font_size_pt=30,
+            color=WHITE,
+            align=PP_ALIGN.CENTER,
+        )
+    # Add logos
+    if logo1_path:
+        add_picture_safe(slide, logo1_path, left_in=0.4, top_in=6.6, height_in=0.6)
+    if logo2_path:
+        add_picture_safe(slide, logo2_path, left_in=9, top_in=6.6, height_in=0.6)
 
-    # Dates
-    add_text_box(
-        slide,
-        cover_dates or "",
-        left_in=left,
-        top_in=top + height + 0.2,
-        width_in=width,
-        height_in=0.6,
-        size_pt=28,
-        bold=False,
-        color=WHITE,
-    )
-
-    # Logos bottom-left/right
-    add_picture_safe(slide, path_if_exists(logo1), left_in=0.4, top_in=6.6, height_in=0.6)
-    add_picture_safe(slide, path_if_exists(logo2), left_in=sw_in - 2.2, top_in=6.5, width_in=1.8)
-
-
-def add_agenda_slide(prs, assets: dict, agenda_lines: list[str] | None = None):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    add_bg(slide, prs, assets.get("agenda"))
-    # Title
+def add_agenda_slide(prs, assets, agenda_lines=None):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
+    add_full_slide_picture(slide, prs, assets.get("agenda"))
     sw_in = emu_to_inches(prs.slide_width)
+    # Title
     add_title_box(
         slide,
         "Agenda",
@@ -494,8 +387,9 @@ def add_agenda_slide(prs, assets: dict, agenda_lines: list[str] | None = None):
         height_in=1.2,
         font_size_pt=52,
         color=GOLD,
+        align=PP_ALIGN.LEFT,
     )
-    # Bullets
+    # List agenda items
     if not agenda_lines:
         agenda_lines = ["Overview", "Key updates by product", "Timeline & rollout status", "Q&A"]
     top = 2.4
@@ -507,15 +401,14 @@ def add_agenda_slide(prs, assets: dict, agenda_lines: list[str] | None = None):
             top_in=top,
             width_in=sw_in - 2 * PAGE_MARGIN_IN,
             height_in=0.5,
-            size_pt=26,
+            font_size_pt=26,
             color=WHITE,
         )
         top += 0.6
 
-
-def add_separator_slide(prs, assets: dict, title: str):
+def add_separator_slide(prs, assets, title):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    add_bg(slide, prs, assets.get("separator"))
+    add_full_slide_picture(slide, prs, assets.get("separator"))
     sw_in = emu_to_inches(prs.slide_width)
     add_title_box(
         slide,
@@ -528,10 +421,9 @@ def add_separator_slide(prs, assets: dict, title: str):
         color=GOLD,
     )
 
-
-def add_conclusion_slide(prs, assets: dict, links: list[tuple[str, str]]):
+def add_conclusion_slide(prs, assets, links: list):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    add_bg(slide, prs, assets.get("conclusion"))
+    add_full_slide_picture(slide, prs, assets.get("conclusion"))
     sw_in = emu_to_inches(prs.slide_width)
     add_title_box(
         slide,
@@ -552,339 +444,301 @@ def add_conclusion_slide(prs, assets: dict, links: list[tuple[str, str]]):
             top_in=top,
             width_in=sw_in - 2 * PAGE_MARGIN_IN,
             height_in=0.5,
-            size_pt=22,
+            font_size_pt=22,
             color=WHITE,
         )
         top += 0.6
 
-
-def add_thankyou_slide(prs, assets: dict):
+def add_thankyou_slide(prs, assets):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    add_bg(slide, prs, assets.get("thankyou"))
-    # nothing else required; background handles the design
-
+    add_full_slide_picture(slide, prs, assets.get("thankyou"))
 
 def add_item_slide(
-    prs,
-    item: Item,
-    month_str: str | None,
-    assets: dict,
-    rail_width_in: float = DEFAULT_RAIL_WIDTH_IN,
-    brand_bg: str | None = None,
-):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    # Brand background first (overridable), else none
-    add_bg(slide, prs, brand_bg)
-
-    # Compute geometry
+    prs, item: Item, month_str: str, assets: dict, rail_left_in: float = 3.5, rail_width_in: float = 3.5):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
     sw_in = emu_to_inches(prs.slide_width)
     sh_in = emu_to_inches(prs.slide_height)
 
-    # Side rail on right
-    rail_left_in = max(0.0, sw_in - rail_width_in)
-    draw_side_rail(slide, prs, rail_left_in, rail_width_in, color=DARK_PURPLE)
+    # Draw side rail
+    draw_side_rail(slide, prs, rail_left_in, rail_width_in)
 
-    # Product bubble (top-left)
-    bubble_w = max(1.8, min(3.8, (sw_in - rail_width_in) * 0.35))
-    add_bubble(
-        slide,
-        item.product or "",
-        left_in=PAGE_MARGIN_IN,
-        top_in=0.6,
-        width_in=bubble_w,
-        height_in=0.55,
-    )
-
-    # Title in gold (left area width excludes rail)
-    title_left = PAGE_MARGIN_IN
-    title_top = 1.4
-    title_width = max(3.0, sw_in - rail_width_in - PAGE_MARGIN_IN - PAGE_MARGIN_IN)
-    title_height = 1.5
+    # Add title box
+    title = item.title or "No Title"
+    title_size = 36 if len(title) <= 48 else 28 if len(title) <= 72 else 24
     add_title_box(
         slide,
-        item.title,
-        left_in=title_left,
-        top_in=title_top,
-        width_in=title_width,
-        height_in=title_height,
-        font_size_pt=44,
+        title,
+        left_in=rail_left_in + 0.2,
+        top_in=0.6,
+        width_in=sw_in - rail_left_in - 0.4,
+        height_in=1.8,
+        font_size_pt=title_size,
         bold=True,
-        color=GOLD,
-        align=PP_ALIGN.LEFT,
+        color=BLACK,
     )
 
-    # Summary body (below title)
-    body_top = title_top + title_height + 0.2
-    body_height = max(1.0, sh_in - body_top - 1.3)
-    add_text_box(
-        slide,
-        item.summary or "",
-        left_in=PAGE_MARGIN_IN,
-        top_in=body_top,
-        width_in=title_width,
-        height_in=body_height,
-        size_pt=22,
-        color=WHITE,
-    )
-
-    # Right rail contents
-    # Status icon + text
-    icon_key = pick_status_icon_key(item.status)
-    icon_path = path_if_exists(assets.get(icon_key))
-    add_picture_safe(slide, icon_path, left_in=rail_left_in + 0.3, top_in=0.6, height_in=0.5)
-    add_text_box(
-        slide,
-        item.status or "Status unknown",
-        left_in=rail_left_in + 0.95,
-        top_in=0.63,
-        width_in=rail_width_in - 1.25,
-        height_in=0.4,
-        size_pt=18,
-        color=WHITE,
-    )
-
-    # Month/date pill
-    add_text_box(
-        slide,
-        month_str or item.month or item.date_str,
-        left_in=rail_left_in + 0.3,
-        top_in=1.25,
-        width_in=rail_width_in - 0.6,
-        height_in=0.45,
-        size_pt=20,
-        color=WHITE,
-    )
-
-    # Audience row with icons (best-effort)
-    # Expect optional assets: admin.png, user.png, check.png
-    aud_y = 1.9
-    check = path_if_exists(assets.get("check"))
-    admin_icon = path_if_exists(assets.get("admin"))
-    user_icon = path_if_exists(assets.get("user"))
-
-    # Admin
-    if admin_icon:
-        add_picture_safe(
-            slide, admin_icon, left_in=rail_left_in + 0.3, top_in=aud_y, height_in=0.35
+    # Add summary or description
+    content = item.summary or item.description or ""
+    if content:
+        add_text_box(
+            slide,
+            content,
+            left_in=rail_left_in + 0.2,
+            top_in=2.1,
+            width_in=sw_in - rail_left_in - 0.4,
+            height_in=3.3,
+            font_size_pt=16,
+            bold=False,
+            color=RGBColor(32, 32, 32),
         )
-    add_text_box(
-        slide,
-        "Admin",
-        left_in=rail_left_in + 0.8,
-        top_in=aud_y,
-        width_in=1.2,
-        height_in=0.35,
-        size_pt=16,
-        color=WHITE,
-    )
-    if "admin" in (item.audience or "").lower() and check:
-        add_picture_safe(
-            slide, check, left_in=rail_left_in + rail_width_in - 0.7, top_in=aud_y, height_in=0.3
+    # Add meta info: Feature ID, Status, Product etc.
+    meta_left = rail_left_in + 0.35
+    meta_top = 0.6
+    line_gap = 0.35
+
+    def add_meta(label, value):
+        nonlocal meta_top
+        if not value:
+            return
+        add_text_box(
+            slide,
+            f"{label}: {value}",
+            left_in=meta_left,
+            top_in=meta_top,
+            width_in=rail_width_in - 0.7,
+            height_in=0.35,
+            font_size_pt=12,
+            bold=True,
+            color=WHITE,
         )
+        meta_top += line_gap
 
-    # End user
-    aud_y2 = aud_y + 0.55
-    if user_icon:
-        add_picture_safe(
-            slide, user_icon, left_in=rail_left_in + 0.3, top_in=aud_y2, height_in=0.35
+    # Extract metadata
+    rid = getattr(item, "roadmap_id", "") or getattr(item, "rid", "")
+    rid = rid or ""
+    status = getattr(item, "status", "") or ""
+    prod_list = ", ".join(item.products) if item.products else ""
+    platforms_str = ", ".join(item.platforms) if item.platforms else ""
+    audience_str = ", ".join(item.audience) if item.audience else ""
+    month_display = month_str or ""
+
+    add_meta("Feature ID", rid)
+    add_meta("Status", status)
+    add_meta("Products", prod_list)
+    add_meta("Platforms", platforms_str)
+    add_meta("Audience", audience_str)
+    add_meta("Month", month_display)
+    if item.url:
+        add_text_box(
+            slide,
+            f"URL: {item.url}",
+            left_in=meta_left,
+            top_in=meta_top,
+            width_in=rail_width_in - 0.7,
+            height_in=0.45,
+            font_size_pt=11,
+            color=RGBColor(200, 230, 255),
         )
-    add_text_box(
-        slide,
-        "End User",
-        left_in=rail_left_in + 0.8,
-        top_in=aud_y2,
-        width_in=1.2,
-        height_in=0.35,
-        size_pt=16,
-        color=WHITE,
-    )
-    if "user" in (item.audience or "").lower() and check:
-        add_picture_safe(
-            slide, check, left_in=rail_left_in + rail_width_in - 0.7, top_in=aud_y2, height_in=0.3
-        )
+        meta_top += line_gap
 
-    # Roadmap ID + link (bottom of rail)
-    bottom_y = sh_in - 1.1
-    add_text_box(
-        slide,
-        f"ID: {item.roadmap_id or '—'}",
-        left_in=rail_left_in + 0.3,
-        top_in=bottom_y,
-        width_in=rail_width_in - 0.6,
-        height_in=0.35,
-        size_pt=16,
-        color=WHITE,
-    )
-    add_text_box(
-        slide,
-        item.url or "",
-        left_in=rail_left_in + 0.3,
-        top_in=bottom_y + 0.4,
-        width_in=rail_width_in - 0.6,
-        height_in=0.5,
-        size_pt=12,
-        color=WHITE,
-    )
+    # Optional: add branding or background images inside the item slide
+    brand_bg = assets.get("brand_bg")
+    if brand_bg and os.path.exists(brand_bg):
+        try:
+            add_picture_safe(slide, brand_bg, left_in=0.2, top_in=sh_in - 1.2, height_in=1.0)
+        except Exception:
+            pass  # silently ignore issues here
 
-    # Speaker notes: put the long/verbose blob
-    add_notes(slide, item.notes or item.summary or item.title)
+# Note: The above functions (add_cover_slide, add_agenda_slide, etc.) are modular and can be adapted further.
 
 
-# ----------------------------
-# Build
-# ----------------------------
+
+# =========================
+# Main build function
+# =========================
 def build(
-    inputs: list[str],
+    inputs: List[str],
     output_path: str,
-    month: str | None,
+    month: Optional[str],
     assets: dict,
-    template: str | None,
+    template: Optional[str],
     rail_width: float,
-    conclusion_links: list[tuple[str, str]] | None = None,
+    conclusion_links: Optional[List[tuple[str, str]]] = None,
 ):
-    prs = Presentation(template) if (template and os.path.exists(template)) else Presentation()
+    # Load presentation template if provided
+    prs = None
+    if template and os.path.exists(template):
+        try:
+            prs = Presentation(template)
+        except Exception as e:
+            print(f"Error loading template: {e}")
+            prs = Presentation()
+    else:
+        prs = Presentation()
 
-    # Core section slides
-    add_cover_slide(
-        prs,
-        assets,
-        assets.get("cover_title"),
-        assets.get("cover_dates"),
-        assets.get("logo"),
-        assets.get("logo2"),
-    )
-    add_agenda_slide(prs, assets)
+    # Add cover slide
+    try:
+        add_cover_slide(prs, assets, assets.get("cover_title"), assets.get("cover_dates"), assets.get("logo"), assets.get("logo2"))
+    except Exception as e:
+        print(f"Error adding cover slide: {e}")
 
-    # Parse items
-    items = parse_html_items(inputs)
+    # Add agenda slide
+    try:
+        add_agenda_slide(prs, assets)
+    except Exception as e:
+        print(f"Error adding agenda slide: {e}")
 
-    # Optional: per-product separators before items
-    if items:
-        # Group by product (stable order by first appearance)
-        seen = {}
-        groups: dict[str, list[Item]] = {}
-        for it in items:
-            k = (it.product or "General").strip()
-            if k not in seen:
-                seen[k] = True
-                groups[k] = []
-            groups[k].append(it)
+    # Read and parse input HTML files
+    all_items = []
+    for path in inputs:
+        try:
+            if "messagecenter" in path.lower() or "briefing" in path.lower():
+                dicts = parse_message_center_html(path, month)
+            else:
+                dicts = parse_roadmap_html(path, month)
+            all_items.extend(_to_item(d) for d in dicts)
+        except Exception as e:
+            print(f"Error parsing {path}: {e}")
 
-        for product, group_items in groups.items():
-            sep_title = f"{product} — {month or ''}".strip(" —")
-            add_separator_slide(prs, assets, sep_title)
-            for it in group_items:
-                add_item_slide(
-                    prs,
-                    it,
-                    month_str=month,
-                    assets=assets,
-                    rail_width_in=rail_width,
-                    brand_bg=assets.get("brand_bg"),
-                )
+    # Deduplicate items
+    seen_keys = set()
+    unique_items = []
+    for item in all_items:
+        key = (item.roadmap_id or item.title or item.url).lower().strip()
+        if key and key not in seen_keys:
+            seen_keys.add(key)
+            unique_items.append(item)
 
-    # Conclusion + Thank you
+    # Sort items
+    unique_items.sort(key=lambda i: (i.products or [], i.title))
+
+    # Group by primary product
+    grouped: Dict[str, List[Item]] = {}
+    order: List[str] = []
+    for item in unique_items:
+        prod = item.products[0] if item.products else "General"
+        prod = prod.strip() or "General"
+        if prod not in grouped:
+            grouped[prod] = []
+            order.append(prod)
+        grouped[prod].append(item)
+
+    # Generate slides per group
+    if unique_items:
+        for prod in order:
+            add_separator_slide(prs, assets, title=f"{prod} updates")
+            for item in grouped[prod]:
+                try:
+                    add_item_slide(
+                        prs,
+                        item,
+                        month_str=month or "",
+                        assets=assets,
+                        rail_left_in=rail_width,
+                        rail_width_in=rail_width,
+                    )
+                except Exception as e:
+                    print(f"Error adding item slide for {item.title}: {e}")
+    else:
+        # No items: add placeholder slide
+        add_separator_slide(prs, assets, title="No updates found")
+
+    # Add conclusion slide
     if not conclusion_links:
         conclusion_links = [
             ("Microsoft Security", "https://www.microsoft.com/en-us/security"),
             ("Azure Updates", "https://azure.microsoft.com/en-us/updates/"),
-            (
-                "Dynamics 365 & Power Platform",
-                "https://www.microsoft.com/en-us/dynamics-365/?culture=en-us&country=us",
-            ),
-            (
-                "Technical Documentation",
-                "https://learn.microsoft.com/en-us/docs/?culture=en-us&country=us",
-            ),
+            ("Dynamics 365 & Power Platform", "https://www.microsoft.com/en-us/dynamics-365/?culture=en-us&country=us"),
+            ("Technical Documentation", "https://learn.microsoft.com/en-us/docs/?culture=en-us&country=us"),
         ]
-    add_conclusion_slide(prs, assets, conclusion_links)
-    add_thankyou_slide(prs, assets)
+    try:
+        add_conclusion_slide(prs, assets, conclusion_links)
+    except Exception as e:
+        print(f"Error adding conclusion slide: {e}")
 
-    actual = _safe_save(prs, output_path)
-    print(f"[ok] Deck saved to: {actual}")
+    # Add thank you slide
+    try:
+        add_thankyou_slide(prs, assets)
+    except Exception as e:
+        print(f"Error adding thank you slide: {e}")
+
+    # Save presentation safely
+    saved_path = _safe_save(prs, output_path)
+    print(f"Deck saved to: {saved_path}")
 
 
-# ----------------------------
-# CLI
-# ----------------------------
+# =========================
+# CLI Entry Point
+# =========================
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument(
-        "-i",
-        "--inputs",
-        nargs="+",
-        required=True,
-        help="One or more HTML inputs (Roadmap/Message Center)",
-    )
-    p.add_argument("-o", "--output", required=True, help="Output .pptx")
-    p.add_argument("--month", default="", help="Month label like 'September 2025'")
-    # assets
-    p.add_argument("--cover", dest="cover", default="", help="Cover background image")
-    p.add_argument("--agenda-bg", dest="agenda_bg", default="", help="Agenda background image")
-    p.add_argument("--separator", dest="separator", default="", help="Separator background image")
-    p.add_argument(
-        "--conclusion-bg", dest="conclusion_bg", default="", help="Conclusion background image"
-    )
-    p.add_argument("--thankyou", dest="thankyou", default="", help="Thank-you background image")
-    p.add_argument(
-        "--brand-bg", dest="brand_bg", default="", help="Generic brand background for item slides"
-    )
-    p.add_argument("--cover-title", dest="cover_title", default="", help="Cover title text")
-    p.add_argument("--cover-dates", dest="cover_dates", default="", help="Cover dates text")
-    p.add_argument(
-        "--separator-title",
-        dest="separator_title",
-        default="",
-        help="(unused; separators auto from product)",
-    )
-    p.add_argument("--logo", dest="logo", default="", help="Logo 1 (e.g., Parex)")
-    p.add_argument("--logo2", dest="logo2", default="", help="Logo 2 (e.g., customer)")
-    p.add_argument("--rocket", dest="rocket", default="", help="Path to rocket icon")
-    p.add_argument("--magnifier", dest="magnifier", default="", help="Path to magnifier icon")
-    p.add_argument("--admin", dest="admin", default="", help="Admin target-audience icon")
-    p.add_argument("--user", dest="user", default="", help="User target-audience icon")
-    p.add_argument("--check", dest="check", default="", help="Green check icon")
-    p.add_argument("--template", dest="template", default="", help="Optional template .pptx")
-    p.add_argument(
-        "--rail-width",
-        dest="rail_width",
-        default=str(DEFAULT_RAIL_WIDTH_IN),
-        help="Right rail width in inches (default 3.5)",
-    )
+    import argparse
+    import os
 
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(description="Generate a PowerPoint briefing deck from HTML inputs.")
+    parser.add_argument("-i", "--inputs", nargs="+", required=True, help="Paths to input HTML files")
+    parser.add_argument("-o", "--output", required=True, help="Output PPTX filename")
+    parser.add_argument("--style", default="style_template.yaml", help="Path to style YAML file")
+    parser.add_argument("--month", default="", help="Month label, e.g., 'September 2025'")
 
+    # Asset images
+    parser.add_argument("--cover", default="", help="Background image for cover slide")
+    parser.add_argument("--agenda-bg", dest="agenda", default="", help="Background for agenda slide")
+    parser.add_argument("--separator", default="", help="Background for separator slides")
+    parser.add_argument("--conclusion-bg", dest="conclusion", default="", help="Background for conclusion slide")
+    parser.add_argument("--thankyou", default="", help="Background for thank-you slide")
+    parser.add_argument("--brand-bg", default="", help="Background for item slides (brand)")
+    parser.add_argument("--cover-title", default="M365 Technical Update Briefing", help="Cover slide title text")
+    parser.add_argument("--cover-dates", default="", help="Cover slide date text")
+    parser.add_argument("--logo", default="", help="Path to primary logo image")
+    parser.add_argument("--logo2", default="", help="Path to secondary logo image")
+    
+    # Styling options
+    parser.add_argument("--rail-width", default=str(DEFAULT_RAIL_WIDTH_IN), help="Rail width in inches (default 3.5)")
+    parser.add_argument("--template", default="", help="Path to a PPTX template to use")
+    args = parser.parse_args()
+
+    # Load style configuration
+    def load_style(path: str):
+        import yaml
+        with open(path, 'r') as f:
+            return yaml.safe_load(f)
+
+    def path_if_exists(p: str) -> str:
+        return p if p and os.path.exists(p) else ""
+
+    style_cfg = load_style(args.style)
+
+    # Build assets dictionary
     assets = {
         "cover": path_if_exists(args.cover),
-        "agenda": path_if_exists(args.agenda_bg),
+        "agenda": path_if_exists(args.agenda),
         "separator": path_if_exists(args.separator),
-        "conclusion": path_if_exists(args.conclusion_bg),
+        "conclusion": path_if_exists(args.conclusion),
         "thankyou": path_if_exists(args.thankyou),
         "brand_bg": path_if_exists(args.brand_bg),
-        "cover_title": args.cover_title or "M365 Technical Update Briefing",
-        "cover_dates": args.cover_dates or args.month or "",
+        "cover_title": args.cover_title,
+        "cover_dates": args.cover_dates or args.month,
         "logo": path_if_exists(args.logo),
         "logo2": path_if_exists(args.logo2),
-        "rocket": path_if_exists(args.rocket)
-        or path_if_exists(os.path.join("assets", "rocket.png")),
-        "magnifier": path_if_exists(args.magnifier)
-        or path_if_exists(os.path.join("assets", "magnifier.png")),
-        "admin": path_if_exists(args.admin) or path_if_exists(os.path.join("assets", "admin.png")),
-        "user": path_if_exists(args.user) or path_if_exists(os.path.join("assets", "user.png")),
-        "check": path_if_exists(args.check) or path_if_exists(os.path.join("assets", "check.png")),
     }
 
-    rail_w = float(args.rail_width) if args.rail_width else DEFAULT_RAIL_WIDTH_IN
+    try:
+        rail_w = float(args.rail_width)
+    except ValueError:
+        rail_w = DEFAULT_RAIL_WIDTH_IN
 
+    # Call your build function with parsed args
     build(
         inputs=args.inputs,
         output_path=args.output,
-        month=args.month or "",
+        month=args.month,
         assets=assets,
-        template=args.template or None,
+        template=args.template,
         rail_width=rail_w,
-        conclusion_links=None,
+        conclusion_links=None,  # Or specify custom links here
     )
+
+
 
 
 if __name__ == "__main__":
