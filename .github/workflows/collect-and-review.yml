@@ -1,3 +1,5 @@
+# File: .github/workflows/collect-and-review.yml
+
 name: Collect and Review Files with OpenAI
 
 on:
@@ -8,11 +10,11 @@ on:
     branches:
       - main
   schedule:
-    - cron: '0 0 * * *'  # daily at midnight UTC
+    - cron: '0 0 * * *'  # daily at midnight
 
 jobs:
   review:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout repository
@@ -26,15 +28,14 @@ jobs:
     - name: Collect files for review
       run: |
         mkdir review_package
+        # Collect all Python and Markdown files
         find ./src ./docs -type f \( -name "*.py" -o -name "*.md" \) -exec cp --parents {} review_package/ \;
 
-    - name: Upload Artifact
-      uses: actions/upload-artifact@<commit-sha>
-      # Example:
-      # uses: actions/upload-artifact@4d1fcfd1ca64e052d7b2321120c81c2f38806b50
+    - name: Upload collected files
+      uses: actions/upload-artifact@v3
       with:
-        name: my-artifact-${{ matrix.runs-on }}
-        path: file-${{ matrix.runs-on }}.txt
+        name: review-files
+        path: review_package/
 
     - name: Install dependencies
       run: |
@@ -42,6 +43,6 @@ jobs:
 
     - name: Run review script
       env:
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        OPENAI_API_KEY: ""
       run: |
         python scripts/send_openai.py review_package/
