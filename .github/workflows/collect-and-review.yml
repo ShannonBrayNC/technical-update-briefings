@@ -1,5 +1,3 @@
-# File: .github/workflows/collect-and-review.yml
-
 name: Collect and Review Files with OpenAI
 
 on:
@@ -14,7 +12,7 @@ on:
 
 jobs:
   review:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Checkout repository
@@ -28,12 +26,10 @@ jobs:
     - name: Collect files for review
       run: |
         mkdir review_package
-        # Collect all Python and Markdown files from src and docs directories
         find ./src ./docs -type f \( -name "*.py" -o -name "*.md" \) -exec cp --parents {} review_package/ \;
 
     - name: Upload collected files
-      # Using latest stable version to avoid deprecation issues
-      uses: actions/upload-artifact@latest
+      uses: actions/upload-artifact@v3
       with:
         name: review-files
         path: review_package/
