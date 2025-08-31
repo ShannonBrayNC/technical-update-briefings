@@ -10,7 +10,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '0 0 * * *'  # daily at midnight
+    - cron: '0 0 * * *'  # daily at midnight UTC
 
 jobs:
   review:
@@ -18,7 +18,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/upload-artifact@latest
+      uses: actions/checkout@v3
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -28,11 +28,12 @@ jobs:
     - name: Collect files for review
       run: |
         mkdir review_package
-        # Collect all Python and Markdown files
+        # Collect all Python and Markdown files from src and docs directories
         find ./src ./docs -type f \( -name "*.py" -o -name "*.md" \) -exec cp --parents {} review_package/ \;
 
     - name: Upload collected files
-      uses: actions/upload-artifact@v3
+      # Using latest stable version to avoid deprecation issues
+      uses: actions/upload-artifact@latest
       with:
         name: review-files
         path: review_package/
