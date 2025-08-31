@@ -1,0 +1,48 @@
+# File: .github/workflows/collect-and-review.yml
+
+name: Collect and Review Files with OpenAI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: '0 0 * * *'  # daily at midnight
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Collect files for review
+      run: |
+        mkdir review_package
+        # Collect all Python and Markdown files
+        find ./src ./docs -type f \( -name "*.py" -o -name "*.md" \) -exec cp --parents {} review_package/ \;
+
+    - name: Upload collected files
+      uses: actions/upload-artifact@v3
+      with:
+        name: review-files
+        path: review_package/
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip requests
+
+    - name: Run review script
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      run: |
+        python scripts/send_openai.py review_package/
