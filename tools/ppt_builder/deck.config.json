@@ -1,9 +1,9 @@
 {
   "Inputs": [
-    "..\\roadmap\\RoadmapPrimarySource.html",
-    "..\\message_center\\MessageCenterBriefingSuppliments.html"
+    "C:\\technical_update_briefings\\tools\\roadmap\\RoadmapPrimarySource.html",
+    "C:\\technical_update_briefings\\tools\\message_center\\MessageCenterBriefingSuppliments.html"
   ],
-  "Output": "..\\RoadmapDeck_AutoGen.pptx",
+  "Output": "C:\\technical_update_briefings\\tools\\ppt_builder\\RoadmapDeck_AutoGen.pptx",
   "Month": "September 2025",
   "CoverTitle": "M365 Technical Update Briefing",
   "CoverDates": "September 2025",
