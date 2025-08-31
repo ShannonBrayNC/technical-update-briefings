@@ -10,6 +10,8 @@ $THX  = "C:\technical_update_briefings\tools\ppt_builder\assets\thankyou.png"
 $L1   = "C:\technical_update_briefings\tools\ppt_builder\assets\logo1.png"
 $L2   = "C:\technical_update_briefings\tools\ppt_builder\assets\logo2.png"
 $Out  = "C:\technical_update_briefings\RoadmapDeck_AutoGen_$((Get-Date).ToString('yyyyMMdd_HHmmss')).pptx"
+$RS =   "C:\technical_update_briefings\tools\ppt_builder\assets\rocket.png"
+$MG =   "C:\technical_update_briefings\tools\ppt_builder\assets\magnifier.png"
 
 & "C:\technical_update_briefings\tools\ppt_builder\.venv\Scripts\python.exe" `
   "C:\technical_update_briefings\tools\ppt_builder\generate_deck.py" `
@@ -17,9 +19,13 @@ $Out  = "C:\technical_update_briefings\RoadmapDeck_AutoGen_$((Get-Date).ToString
   -o $Out `
   --style $STYLE `
   --month "September 2025" `
-  --cover $COV --agenda $AG --separator $SEP `
-  --conclusion $CON --thankyou $THX `
-  --logo $L1 --logo2 $L2 `
+  --cover $COV `
+  --agenda $AG `
+  --separator $SEP `
+  --conclusion $CON `
+  --thankyou $THX `
+  --logo $L1 `
+  --logo2 $L2 `
   --brand-bg $BG `
-  --rail-width 3.5,
+  --rail-width 3.5 
   

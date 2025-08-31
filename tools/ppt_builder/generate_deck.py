@@ -25,9 +25,9 @@ def main():
     parser.add_argument("--logo2", default="", help="Path to secondary logo")
     parser.add_argument("--rail-width", default=str(3.5), help="Rail width in inches, default 3.5")
     parser.add_argument("--template", default="", help="Optional PPTX template path")
-        # add arguments
     parser.add_argument("--icon-rocket", dest="icon_rocket", default="", help="Icon for shipped/rollout")
     parser.add_argument("--icon-preview", dest="icon_preview", default="", help="Icon for preview/in development")
+
 
 
     args = parser.parse_args()
