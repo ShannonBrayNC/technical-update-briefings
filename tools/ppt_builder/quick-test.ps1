@@ -18,8 +18,10 @@ $i2 = "c:\technical_update_briefings\tools\message_center\MessageCenterBriefingS
   --brand-bg (Join-Path $Here "assets\brand_bg.png") `
   --cover-title "M365 Technical Update Briefing" `
   --cover-dates ((Get-Date).ToString("MMMM yyyy")) `
-  --separator-title ("Technical Update Briefing — " + (Get-Date).ToString("MMMM yyyy")) `
   --logo (Join-Path $Here "assets\parex-logo.png") `
-  --logo2 (Join-Path $Here "assets\customer-logo.png") `
-  --rocket (Join-Path $Here "assets\rocket.png") `
-  --magnifier (Join-Path $Here "assets\magnifier.png") `
+  --logo2 (Join-Path $Here "assets\customer-logo.png") 
+
+
+  #  --separator-title ("Technical Update Briefing — " + (Get-Date).ToString("MMMM yyyy")) `
+  #  --rocket (Join-Path $Here "assets\rocket.png") `
+  #--magnifier (Join-Path $Here "assets\magnifier.png") 
