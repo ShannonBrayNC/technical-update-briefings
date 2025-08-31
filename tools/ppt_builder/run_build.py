@@ -4,6 +4,8 @@ from style_manager import load_style
 import os, json, re, difflib, importlib.util
 from typing import Dict, List
 import slides as S
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.dml.color import RGBColor
 
 # --- force local parsers.py (avoid shadowing) ---
 from pathlib import Path as _Path
@@ -15,6 +17,40 @@ _pspec.loader.exec_module(P)
 parse_message_center_html = P.parse_message_center_html
 parse_roadmap_html = P.parse_roadmap_html
 # ------------------------------------------------
+
+
+
+def _add_rail(slide, rail_width_in: float = 3.5, hex_color: str = "0F172A"):
+    EMU = 914400
+    rail_w = int(rail_width_in * EMU)
+    full_w = int(10 * EMU)
+    full_h = int(7.5 * EMU)
+    left = full_w - rail_w
+    shp = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, 0, rail_w, full_h)
+    shp.fill.solid()
+    shp.fill.fore_color.rgb = RGBColor.from_string(hex_color)
+    shp.line.fill.background()
+
+
+def _titlecase(s: str) -> str:
+    if not s: return ""
+    small = {"and","or","for","nor","a","an","the","as","at","by","in","of","on","per","to","vs","via"}
+    words = s.strip().split()
+    out = []
+    for i, w in enumerate(words):
+        base = w
+        # keep ALL-CAPS (e.g., M365, GA) and words with digits
+        if base.isupper() or any(ch.isdigit() for ch in base):
+            out.append(base)
+            continue
+        lw = base.lower()
+        if i not in (0, len(words)-1) and lw in small:
+            out.append(lw)
+        else:
+            out.append(base[:1].upper() + base[1:].lower())
+    return " ".join(out)
+
+
 
 def _log(msg): print(f"[run_build] {msg}", flush=True)
 
@@ -152,13 +188,54 @@ def _merge_items(items: List[dict]) -> List[dict]:
 
     return out
 
-def _build_item_slide(prs, item, month: str, assets: Dict):
+
+def _build_item_slide(prs, item, month: str, assets: dict, rail_width: float | None = None):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+    from os.path import basename
+    bg = assets.get("brand_bg") or assets.get("cover") or ""
+    _log(f"Item background: {basename(bg) if bg else 'none'}")
+
+
+    # background (note: underscore, not space)
     S.add_full_slide_picture(slide, prs, assets.get("brand_bg") or assets.get("cover"))
-    title = item.get("title", "") or item.get("headline","")
-    S.add_title_box(slide, title, left_in=0.6, top_in=0.6, width_in=8.8, height_in=1.2, font_size_pt=36, bold=True, color="FFFFFF")
+
+    # optional right rail
+    if rail_width:
+        _add_rail(slide, rail_width_in=float(rail_width), hex_color="0F172A")
+
+    # content width respects rail
+    w_body = 8.2 if rail_width else 8.8
+
+    raw_title = item.get("title", "") or item.get("headline","")
+    title = _titlecase(raw_title)
+    S.add_title_box(slide, title,
+        left_in=0.6, top_in=0.6, width_in=w_body, height_in=1.1,
+        font_size_pt=34, bold=True, color="FFFFFF"
+    )
+
+    status = (item.get("status") or "").lower()
+    color_map = {
+        "ga": ("16A34A","FFFFFF"),
+        "general": ("16A34A","FFFFFF"),
+        "rolling out": ("3B82F6","FFFFFF"),
+        "preview": ("F59E0B","111827"),
+        "in development": ("6B7280","FFFFFF"),
+    }
+    for key, (fill, fg) in color_map.items():
+        if key in status:
+            S.add_chip(slide, status.title(), left=7.0, top=0.65, fill=fill, text_color=fg)
+            break
+
+
+
+
     body = item.get("summary") or item.get("description") or item.get("body") or ""
-    S.add_text_box(slide, body, left_in=0.6, top_in=2.0, width_in=8.8, height_in=3.6, font_size_pt=20, bold=False, color="FFFFFF")
+    S.add_text_box(slide, body,
+        left_in=0.6, top_in=1.8, width_in=w_body, height_in=3.9,
+        font_size_pt=20, bold=False, color="FFFFFF"
+    )
+
     meta_lines = []
     for k in ("roadmap_id","status","ga"):
         v = item.get(k)
@@ -167,7 +244,15 @@ def _build_item_slide(prs, item, month: str, assets: Dict):
     if item.get("clouds"): meta_lines.append("Clouds: " + ", ".join(item["clouds"]))
     if month: meta_lines.append(month)
     if item.get("url"): meta_lines.append(item["url"])
-    S.add_text_box(slide, "  •  ".join(meta_lines), left_in=0.6, top_in=6.1, width_in=8.8, height_in=0.8, font_size_pt=14, bold=False, color="E6E8EF")
+
+    S.add_text_box(slide, "  •  ".join(meta_lines),
+        left_in=0.6, top_in=6.2, width_in=w_body, height_in=0.7,
+        font_size_pt=14, bold=False, color="E6E8EF"
+    )
+
+
+
+
 
 def build(inputs: List[str], output_path: str, month: str, assets: Dict, template: str=None, rail_width=None, conclusion_links=None, debug_dump: str|None=None):
     _log(f"Starting deck build...")
@@ -217,7 +302,7 @@ def build(inputs: List[str], output_path: str, month: str, assets: Dict, templat
         for prod in order:
             S.add_separator_slide(prs, assets, f"{prod} updates")
             for it in grouped[prod]:
-                _build_item_slide(prs, it, month, assets)
+                 _build_item_slide(prs, it, month, assets, rail_width)
 
     links = conclusion_links or [("Security","https://www.microsoft.com/security"),
                                  ("Azure","https://azure.microsoft.com/"),

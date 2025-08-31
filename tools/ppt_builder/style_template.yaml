@@ -1,6 +1,6 @@
 slide_templates:
   cover:
-    background_image: "assets/sample_bg.png"
+    background_image: "assets/background.png"
     title:
       position: { left: 1, top: 2, width: 8, height: 2 }
       font_size: 52
