@@ -10,9 +10,8 @@ $L1   = "C:\technical_update_briefings\tools\ppt_builder\assets\logo1.png"
 $L2   = "C:\technical_update_briefings\tools\ppt_builder\assets\logo2.png"
 $STYLE= "C:\technical_update_briefings\tools\ppt_builder\style_template.yaml"
 $RS   = "C:\technical_update_briefings\tools\ppt_builder\assets\rocket.png"
-$MG=  = "C:\technical_update_briefings\tools\ppt_builder\assets\magnifier.png"
+$MG   = "C:\technical_update_briefings\tools\ppt_builder\assets\magnifier.png"
 $Out  = "C:\technical_update_briefings\RoadmapDeck_AutoGen_$((Get-Date).ToString('yyyyMMdd_HHmmss')).pptx"
-
 
 
 # sanity check the files
@@ -26,15 +25,15 @@ $paths | % { "{0}  ->  {1}" -f $_, (Test-Path $_) } | Write-Host
   -o $Out `
   --style $STYLE `
   --month "September 2025" `
-  --cover $COV --agenda $AG --separator $SEP `
-  --conclusion $CON --thankyou $THX `
+  --cover $COV `
+  --conclusion $CON `
+  --thankyou $THX `
   --logo $L1 `
   --logo2 $L2 `
   --rail-width 3.5 `
   --brand-bg $BG `
   --agenda $AG `
-  --conclusion $CON `
-  --thankyou $THX `
-  --separator $SEP `
+  --separator $SEP  
+
   
   

@@ -68,7 +68,7 @@ def main():
         rail_width=rail_width,
         conclusion_links=None
     )
-    
+
 
 if __name__ == "__main__":
     main()

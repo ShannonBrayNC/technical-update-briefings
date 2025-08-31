@@ -228,10 +228,83 @@ def _merge_items(items: List[dict]) -> List[dict]:
     return out
 
 
-    def _build_item_slide(prs, item, month: str, assets: dict,
-                      rail_width: float | None = None,
-                      page: int | None = None, total: int | None = None):
-        slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+
+from pptx.util import Inches, Pt
+
+def _add_footer(slide, month_label: str, page: int | None, total: int | None):
+    # left: month/date
+    left = slide.shapes.add_textbox(Inches(0.6), Inches(7.05), Inches(4.0), Inches(0.35))
+    tf = left.text_frame; tf.clear()
+    p = tf.paragraphs[0]; r = p.add_run()
+    r.text = month_label or ""
+    r.font.size = Pt(10); r.font.color.rgb = RGBColor.from_string("94A3B8")
+    # right: page number
+    if page and total:
+        right = slide.shapes.add_textbox(Inches(9.2), Inches(7.05), Inches(0.9), Inches(0.35))
+        tf2 = right.text_frame; tf2.clear()
+        p2 = tf2.paragraphs[0]; r2 = p2.add_run()
+        r2.text = f"{page}/{total}"
+        r2.font.size = Pt(10); r2.font.color.rgb = RGBColor.from_string("94A3B8")
+
+
+
+
+
+
+
+
+def build(inputs: List[str], output_path: str, month: str, assets: Dict, template: str="", rail_width=None, conclusion_links=None, icon_rocket=None, icon_preview = "", debug_dump: str|None=None):
+    _log(f"Starting deck build...")
+
+    # Parse all inputs
+    all_items: List[dict] = []
+    for fp in inputs:
+        all_items.extend(_safe_parse(fp, month))
+
+    _log(f"Raw items before merge: {len(all_items)}")
+    merged_items = _merge_items(all_items)
+    _log(f"After MC-first merge + fuzzy: {len(merged_items)} unique items")
+
+    # optional debug dump
+    if debug_dump:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(debug_dump)) or ".", exist_ok=True)
+            with open(debug_dump, "w", encoding="utf-8") as f:
+                json.dump(merged_items, f, indent=2, ensure_ascii=False)
+            _log(f"Debug dump wrote {len(merged_items)} items to {os.path.abspath(debug_dump)}")
+        except Exception as e:
+            _log(f"Failed to write debug dump: {e}")
+
+    # sort by first product then title
+    def first_prod(it): return (it.get("products") or ["General"])[0].lower()
+    merged_items.sort(key=lambda i: (first_prod(i), (i.get("title") or '').lower()))
+
+    prs = Presentation(template) if (template and os.path.exists(template)) else Presentation()
+    if os.path.exists("style_template.yaml"): _ = load_style("style_template.yaml")
+
+    # cover + agenda
+    S.add_cover_slide(prs, assets, assets.get("cover_title","M365 Technical Update Briefing"), assets.get("cover_dates", month or ""), assets.get("logo"), assets.get("logo2"))
+    S.add_agenda_slide(prs, assets)
+
+    # group items
+    grouped, order = {}, []
+    for it in merged_items:
+        p = (it.get("products") or ["General"])[0]
+        grouped.setdefault(p, []).append(it)
+        if p not in order: order.append(p)
+
+    # compute total item slides
+    item_total = sum(len(v) for v in grouped.values())
+    page_counter = 0
+
+
+
+
+def _build_item_slide(prs, item, month: str, assets: dict,
+                    rail_width: float | None = None,
+                    page: int | None = None, total: int | None = None):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
 
     from os.path import basename
     bg = assets.get("brand_bg") or assets.get("cover") or ""
@@ -329,22 +402,6 @@ def _merge_items(items: List[dict]) -> List[dict]:
 
 
 
-from pptx.util import Inches, Pt
-
-def _add_footer(slide, month_label: str, page: int | None, total: int | None):
-    # left: month/date
-    left = slide.shapes.add_textbox(Inches(0.6), Inches(7.05), Inches(4.0), Inches(0.35))
-    tf = left.text_frame; tf.clear()
-    p = tf.paragraphs[0]; r = p.add_run()
-    r.text = month_label or ""
-    r.font.size = Pt(10); r.font.color.rgb = RGBColor.from_string("94A3B8")
-    # right: page number
-    if page and total:
-        right = slide.shapes.add_textbox(Inches(9.2), Inches(7.05), Inches(0.9), Inches(0.35))
-        tf2 = right.text_frame; tf2.clear()
-        p2 = tf2.paragraphs[0]; r2 = p2.add_run()
-        r2.text = f"{page}/{total}"
-        r2.font.size = Pt(10); r2.font.color.rgb = RGBColor.from_string("94A3B8")
 
 
 
@@ -353,51 +410,14 @@ def _add_footer(slide, month_label: str, page: int | None, total: int | None):
 
 
 
-def build(inputs: List[str], output_path: str, month: str, assets: Dict, template: str="", rail_width=None, conclusion_links=None, icon_rocket=None, icon_preview = "", debug_dump: str|None=None):
-    _log(f"Starting deck build...")
-
-    # Parse all inputs
-    all_items: List[dict] = []
-    for fp in inputs:
-        all_items.extend(_safe_parse(fp, month))
-
-    _log(f"Raw items before merge: {len(all_items)}")
-    merged_items = _merge_items(all_items)
-    _log(f"After MC-first merge + fuzzy: {len(merged_items)} unique items")
-
-    # optional debug dump
-    if debug_dump:
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(debug_dump)) or ".", exist_ok=True)
-            with open(debug_dump, "w", encoding="utf-8") as f:
-                json.dump(merged_items, f, indent=2, ensure_ascii=False)
-            _log(f"Debug dump wrote {len(merged_items)} items to {os.path.abspath(debug_dump)}")
-        except Exception as e:
-            _log(f"Failed to write debug dump: {e}")
-
-    # sort by first product then title
-    def first_prod(it): return (it.get("products") or ["General"])[0].lower()
-    merged_items.sort(key=lambda i: (first_prod(i), (i.get("title") or '').lower()))
-
-    prs = Presentation(template) if (template and os.path.exists(template)) else Presentation()
-    if os.path.exists("style_template.yaml"): _ = load_style("style_template.yaml")
-
-    # cover + agenda
-    S.add_cover_slide(prs, assets, assets.get("cover_title","M365 Technical Update Briefing"), assets.get("cover_dates", month or ""), assets.get("logo"), assets.get("logo2"))
-    S.add_agenda_slide(prs, assets)
 
 
 
-    # group items
-    grouped, order = {}, []
-    for it in merged_items:
-        p = (it.get("products") or ["General"])[0]
-        grouped.setdefault(p, []).append(it)
-        if p not in order: order.append(p)
 
-    # compute total item slides
-    item_total = sum(len(v) for v in grouped.values())
-    page_counter = 0
+
+
+
+
 
 
     # After you’ve created cover + agenda and before item slides:
@@ -435,6 +455,13 @@ def build(inputs: List[str], output_path: str, month: str, assets: Dict, templat
                 page_counter += 1
                 _build_item_slide(prs, it, month, assets, rail_width,
                           page=page_counter, total=item_total)
+
+
+
+
+
+
+
 
 
     links = conclusion_links or [("Security","https://www.microsoft.com/security"),
