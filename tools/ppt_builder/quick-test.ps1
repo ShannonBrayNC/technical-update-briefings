@@ -1,27 +1,39 @@
-# Lightweight smoke run – useful during edits
-$Here = "c:\technical_update_briefings\technical_update_briefings\" 
-$Py   = "c:\technical_update_briefings\tools\ppt_builder\.venv\Scripts\python.exe"
-$Out   = "C:\technical_update_briefings\RoadmapDeck_SMOKE.pptx"
-$i1 = "c:\technical_update_briefings\tools\roadmap\RoadmapPrimarySource.html"
-$i2 = "c:\technical_update_briefings\tools\message_center\MessageCenterBriefingSuppliments.html"
+$RP   = "C:\technical_update_briefings\tools\roadmap\RoadmapPrimarySource.html"
+$MC   = "C:\technical_update_briefings\tools\message_center\MessageCenterBriefingSuppliments.html"
+$BG   = "C:\technical_update_briefings\tools\ppt_builder\assets\background.png"   # brand background
+$COV  = "C:\technical_update_briefings\tools\ppt_builder\assets\cover.png"
+$AG   = "C:\technical_update_briefings\tools\ppt_builder\assets\agenda.png"
+$SEP  = "C:\technical_update_briefings\tools\ppt_builder\assets\separator.png"
+$CON  = "C:\technical_update_briefings\tools\ppt_builder\assets\conclusion.png"
+$THX  = "C:\technical_update_briefings\tools\ppt_builder\assets\thankyou.png"
+$L1   = "C:\technical_update_briefings\tools\ppt_builder\assets\logo1.png"
+$L2   = "C:\technical_update_briefings\tools\ppt_builder\assets\logo2.png"
+$STYLE= "C:\technical_update_briefings\tools\ppt_builder\style_template.yaml"
+$RS   = "C:\technical_update_briefings\tools\ppt_builder\assets\rocket.png"
+$MG   = "C:\technical_update_briefings\tools\ppt_builder\assets\magnifier.png"
+$Out  = "C:\technical_update_briefings\RoadmapDeck_AutoGen_$((Get-Date).ToString('yyyyMMdd_HHmmss')).pptx"
 
 
-& $Py ("c:\\technical_update_briefings\\tools\\ppt_builder\\generate_deck.py") `
-  --i ($i1 , $i2) `
-  --o ($Out) `
-  --month ((Get-Date).ToString("09-2025")) `
-  --cover (Join-Path $Here "assets\cover.png") `
-  --agenda-bg (Join-Path $Here "assets\agenda.png") `
-  --separator (Join-Path $Here "assets\separator.png") `
-  --conclusion-bg (Join-Path $Here "assets\conclusion.png") `
-  --thankyou (Join-Path $Here "assets\thankyou.png") `
-  --brand-bg (Join-Path $Here "assets\brand_bg.png") `
-  --cover-title "M365 Technical Update Briefing" `
-  --cover-dates ((Get-Date).ToString("MMMM yyyy")) `
-  --logo (Join-Path $Here "assets\parex-logo.png") `
-  --logo2 (Join-Path $Here "assets\customer-logo.png") 
+# sanity check the files
+$paths = @($RP,$MC,$BG,$COV,$AG,$SEP,$CON,$THX,$L1,$L2,$STYLE,$OUT, $RS, $MG)
+$paths | % { "{0}  ->  {1}" -f $_, (Test-Path $_) } | Write-Host
 
+# close any open PPTX first, then run:
+& "C:\technical_update_briefings\tools\ppt_builder\.venv\Scripts\python.exe" `
+  "C:\technical_update_briefings\tools\ppt_builder\generate_deck.py" `
+  -i $RP $MC `
+  -o $Out `
+  --style $STYLE `
+  --month "September 2025" `
+  --cover $COV `
+  --conclusion $CON `
+  --thankyou $THX `
+  --logo $L1 `
+  --logo2 $L2 `
+  --rail-width 3.5 `
+  --brand-bg $BG `
+  --agenda $AG `
+  --separator $SEP  
 
-  #  --separator-title ("Technical Update Briefing — " + (Get-Date).ToString("MMMM yyyy")) `
-  #  --rocket (Join-Path $Here "assets\rocket.png") `
-  #--magnifier (Join-Path $Here "assets\magnifier.png") 
+  
+  

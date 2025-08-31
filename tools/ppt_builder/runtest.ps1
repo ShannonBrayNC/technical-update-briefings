@@ -3,13 +3,11 @@ $Py   = Join-Path $Here ".venv\Scripts\python.exe"
 if (-not (Test-Path $Py)) { & (Join-Path $Here "run.ps1"); exit }
 
 $Stamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
-$Out   = Join-Path $Here ("RoadmapDeck_SMOKE_{0}.pptx" -f $Stamp)
-
-& $Py "generate_deck.py" `
-  -i "..\tools\roadmap\RoadmapPrimarySource.html", "..\tools\message_center\MessageCenterBriefingSuppliments.html" `
-  -o "c:\technical_update_briefings\RoadmapDeck_AutoGen.pptx"`
+$Out   = Join-Path $Here ("RoadmapDeck_SMOKE_{0}.pptx" -f $Stamp) 
+& $Py "slides.py" `
+  -i "c:\technical_update_briefings\tools\message_center\MessageCenterBriefingSuppliments.html", "c:\technical_update_briefings\tools\roadmap\RoadmapPrimarySource.html", `
+  -o "c:\technical_update_briefings\RoadmapDeck_AutoGen.pptx"  `
   --month ((Get-Date).ToString("MMMM yyyy")) `
-  --cover (Join-Path $Here "assets\cover.png") `
   --agenda-bg (Join-Path $Here "assets\agenda.png") `
   --separator (Join-Path $Here "assets\separator.png") `
   --conclusion-bg (Join-Path $Here "assets\conclusion.png") `
