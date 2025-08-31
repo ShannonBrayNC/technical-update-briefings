@@ -257,37 +257,24 @@ def _build_item_slide(
     # Title
     raw_title = item.get("title", "") or item.get("headline","")
     title = _titlecase(raw_title)
+
     # keep content clear of rail: 0.6" left margin + 0.3" extra gutter
     w_body = 10.0 - rail_w - 0.9
+
+    # --- NEW: estimate title lines and height so body doesn't collide ---
+    # crude but effective: 34pt title across ~8–9 inches ≈ ~27–32 chars per line
+    chars_per_line = max(24, int(w_body * 3.2))  # wider area -> more chars per line
+    est_lines = 1 + title.count("\n") + (len(title) // chars_per_line)
+    title_h = 1.1 + 0.35 * max(0, est_lines - 1)  # grow ~0.35" per extra line
+
     S.add_title_box(
         slide, title,
-        left_in=0.6, top_in=0.6, width_in=w_body, height_in=1.1,
+        left_in=0.6, top_in=0.6, width_in=w_body, height_in=title_h,
         font_size_pt=34, bold=True, color="FFFFFF"
     )
 
-    # Status chip + optional icon
-    status = (item.get("status") or "").lower()
-    color_map = {
-        "ga": ("16A34A","FFFFFF"),
-        "general": ("16A34A","FFFFFF"),
-        "rolling out": ("3B82F6","FFFFFF"),
-        "preview": ("F59E0B","111827"),
-        "in development": ("6B7280","FFFFFF"),
-    }
-    chip_w = 1.8
-    chip_left = rail_left + max(0.1, (rail_w - chip_w) / 2.0) if rail_w > 0 else (0.6 + w_body - chip_w)
-    for key, (fill, fg) in color_map.items():
-        if key in status:
-            S.add_chip(slide, status.title(), left=chip_left, top=0.60, fill=fill, text_color=fg)
-            break
-
-    icon_path = _status_icon_for(status, assets)
-    if icon_path and rail_w > 0:
-        icon_w = 1.1; icon_h = 1.1
-        icon_left = rail_left + max(0.1, (rail_w - icon_w) / 2.0)
-        slide.shapes.add_picture(icon_path, Inches(icon_left), Inches(0.35), width=Inches(icon_w), height=Inches(icon_h))
-
-    # Body
+    # Body (start a little below the title, with a small gutter)
+    body_top = 0.6 + title_h + 0.35   # this is the important nudge
     body = item.get("summary") or item.get("description") or item.get("body") or ""
     if not body:
         bullets: List[str] = []
@@ -295,12 +282,16 @@ def _build_item_slide(
         if item.get("ga"):        bullets.append(f"• GA: {item['ga']}")
         if item.get("platforms"): bullets.append("• Platforms: " + ", ".join(item["platforms"]))
         if item.get("clouds"):    bullets.append("• Clouds: " + ", ".join(item["clouds"]))
-        body = "\n".join(bullets)
+
+        # Only show bullets if we actually have any
+        body = "\n".join(bullets) if bullets else ""
+
     S.add_text_box(
         slide, body,
-        left_in=0.6, top_in=1.8, width_in=w_body, height_in=3.9,
+        left_in=0.6, top_in=body_top, width_in=w_body, height_in=3.9,
         font_size_pt=20, bold=False, color="FFFFFF"
     )
+
 
     # Meta footer line
     meta_lines: List[str] = []
@@ -310,7 +301,7 @@ def _build_item_slide(
     if item.get("products"): meta_lines.append("Product: " + ", ".join(item["products"]))
     if item.get("clouds"):   meta_lines.append("Clouds: " + ", ".join(item["clouds"]))
     if month:                meta_lines.append(month)
-    if item.get("url"):      meta_lines.append(item["url"])
+
     S.add_text_box(
         slide, "  •  ".join(meta_lines),
         left_in=0.6, top_in=6.2, width_in=w_body, height_in=0.7,

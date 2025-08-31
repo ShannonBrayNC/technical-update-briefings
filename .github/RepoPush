@@ -2,5 +2,5 @@ cd "C:\technical_update_briefings"
 echo "*.pptx filter=lfs diff=lfs merge=lfs -text" | Out-File -FilePath .gitattributes -Encoding ascii -Append
 git add .gitattributes
 git add .
-git commit -m "Working deck with 80% branding done"
+git commit -m "Slide modifications"
 git push
