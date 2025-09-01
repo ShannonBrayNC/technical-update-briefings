@@ -24,24 +24,15 @@ $Py       = Join-Path $Builder ".venv\Scripts\python.exe"
 $Gen      = Join-Path $Builder "generate_deck.py"
 $Out      = Join-Path $Root ("RoadmapDeck_AutoGen_{0}.pptx" -f (Get-Date -f "yyyyMMdd_HHmmss"))
 
-# Build a safe, conditional argument list
-$argsList = @(
-  '-i', $Roadmap, $MC,
-  '-o', $Out,
-  '--style', $Style,
-  '--month', $Month,
-  '--rail-width', '3.5'
-)
-
-if (Test-Path $Cover)   { $argsList += @('--cover', $Cover) }
-if (Test-Path $Agenda)  { $argsList += @('--agenda-bg', $Agenda) }         # <-- agenda-bg
-if (Test-Path $Sep)     { $argsList += @('--separator', $Sep) }
-if (Test-Path $Conc)    { $argsList += @('--conclusion-bg', $Conc) }       # <-- conclusion-bg
-if (Test-Path $Thx)     { $argsList += @('--thankyou', $Thx) }
-if (Test-Path $Logo1)   { $argsList += @('--logo', $Logo1) }
-if (Test-Path $Logo2)   { $argsList += @('--logo2', $Logo2) }
-if (Test-Path $BrandBG) { $argsList += @('--brand-bg', $BrandBG) }         # <-- brand-bg
-if (Test-Path $Rocket)  { $argsList += @('--icon-rocket', $Rocket) }
-if (Test-Path $Preview) { $argsList += @('--icon-preview', $Preview) }
-
-& $Py $Gen @argsList
+& $Py $Gen `
+  -i $Roadmap $MC `
+  -o $Out `
+  --style $Style `
+  --month $Month `
+  --cover $Cover --agenda $Agenda --separator $Sep `
+  --conclusion $Conc --thankyou $Thx `
+  --logo $Logo1 --logo2 $Logo2 `
+  --brand-bg $BrandBG `
+  --icon-rocket $Rocket `
+  --icon-preview $Preview `
+  --rail-width 3.5

@@ -46,3 +46,4 @@ jobs:
         OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}"
       run: |
         python scripts/send_openai.py review_package/
+

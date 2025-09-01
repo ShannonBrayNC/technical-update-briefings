@@ -10,7 +10,6 @@ $L1   = "C:\technical_update_briefings\tools\ppt_builder\assets\logo1.png"
 $L2   = "C:\technical_update_briefings\tools\ppt_builder\assets\logo2.png"
 $Out  = "C:\technical_update_briefings\RoadmapDeck_AutoGen_$((Get-Date).ToString('yyyyMMdd_HHmmss')).pptx"
 
-
 & "C:\technical_update_briefings\tools\ppt_builder\.venv\Scripts\python.exe" `
   "C:\technical_update_briefings\tools\ppt_builder\run_build.py" `
   -i $RP $MC `
@@ -22,8 +21,6 @@ $Out  = "C:\technical_update_briefings\RoadmapDeck_AutoGen_$((Get-Date).ToString
   --conclusion $CON `
   --thankyou $THX `
   --logo $L1 `
-  --logo2 $L2 `
-  --brand-bg $BG `
-  --rail-width 3.5 
+  --logo2 $L2 
 
   
