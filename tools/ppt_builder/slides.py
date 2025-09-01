@@ -129,6 +129,9 @@ def add_cover_slide(prs, assets: dict, cover_title: str, cover_dates: str, logo1
         add_picture_safe(slide, logo1_path, left_in=0.4, top_in=6.6, height_in=0.6)
     if logo2_path:
         add_picture_safe(slide, logo2_path, left_in=8.0, top_in=6.6, height_in=0.6)
+    if cover_title:
+        add_picture_safe(slide, cover_title, left_in=0.4, top_in=6.6, height_in=0.6)
+           
 
 def add_agenda_slide(prs, assets: dict, agenda_lines=None):
     slide = prs.slides.add_slide(prs.slide_layouts[6])

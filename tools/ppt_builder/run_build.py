@@ -9,6 +9,7 @@ from pptx.dml.color import RGBColor
 from pptx.util import Inches
 from typing import cast
 from pptx.util import Inches, Pt
+import textwrap
 
 
 # --- force local parsers.py (avoid shadowing) ---
@@ -240,10 +241,6 @@ def _build_item_slide(
 ) -> None:
     slide = prs.slides.add_slide(prs.slide_layouts[6])
 
-    # background
-    bg_path: str = cast(str, assets.get("brand_bg") or assets.get("cover") or "")
-    if bg_path:
-        S.add_full_slide_picture(slide, prs, bg_path)
 
     # rail (auto color by product)
     rail_w = float(rail_width or 0.0)
@@ -254,37 +251,44 @@ def _build_item_slide(
     # rail geometry for centering chip/icon
     rail_left = 10.0 - rail_w  # slide is 10" wide
 
+
+
     # Title
     raw_title = item.get("title", "") or item.get("headline","")
     title = _titlecase(raw_title)
 
-    # keep content clear of rail: 0.6" left margin + 0.3" extra gutter
+    # keep content clear of rail: 0.6" left margin + 0.3" gutter
     w_body = 10.0 - rail_w - 0.9
 
-    # --- NEW: estimate title lines and height so body doesn't collide ---
-    # crude but effective: 34pt title across ~8–9 inches ≈ ~27–32 chars per line
-    chars_per_line = max(24, int(w_body * 3.2))  # wider area -> more chars per line
-    est_lines = 1 + title.count("\n") + (len(title) // chars_per_line)
-    title_h = 1.1 + 0.35 * max(0, est_lines - 1)  # grow ~0.35" per extra line
+    TITLE_TOP = 0.6
+    TITLE_FONT_PT = 34
+    LINE_HEIGHT_IN = 0.55     # ≈ 34pt with ~1.1 line spacing
+    MIN_TITLE_H = 1.10
+    MAX_TITLE_H = 2.30
+
+    # rough wrap: more inches -> more chars per line (empirically ~18–22 per 5.5")
+    wrap_cols = max(20, int(w_body * 4.0))
+    est_lines = max(1, len(textwrap.wrap(title, width=wrap_cols)))
+    title_h = min(MAX_TITLE_H, max(MIN_TITLE_H, est_lines * LINE_HEIGHT_IN))
 
     S.add_title_box(
         slide, title,
-        left_in=0.6, top_in=0.6, width_in=w_body, height_in=title_h,
-        font_size_pt=34, bold=True, color="FFFFFF"
+        left_in=0.6, top_in=TITLE_TOP, width_in=w_body, height_in=title_h,
+        font_size_pt=TITLE_FONT_PT, bold=True, color="FFFFFF",
+        # if you want it centered inside the purple area, uncomment:
+        # align=PP_ALIGN.CENTER
     )
 
-    # Body (start a little below the title, with a small gutter)
-    body_top = 0.6 + title_h + 0.35   # this is the important nudge
+    # Body starts below title with a small gutter
+    body_top = TITLE_TOP + title_h + 0.30
     body = item.get("summary") or item.get("description") or item.get("body") or ""
     if not body:
-        bullets: List[str] = []
+        bullets = []
         if item.get("status"):    bullets.append(f"• Status: {item['status']}")
         if item.get("ga"):        bullets.append(f"• GA: {item['ga']}")
         if item.get("platforms"): bullets.append("• Platforms: " + ", ".join(item["platforms"]))
         if item.get("clouds"):    bullets.append("• Clouds: " + ", ".join(item["clouds"]))
-
-        # Only show bullets if we actually have any
-        body = "\n".join(bullets) if bullets else ""
+        body = "\n".join(bullets)
 
     S.add_text_box(
         slide, body,
@@ -292,21 +296,6 @@ def _build_item_slide(
         font_size_pt=20, bold=False, color="FFFFFF"
     )
 
-
-    # Meta footer line
-    meta_lines: List[str] = []
-    for k in ("roadmap_id","status","ga"):
-        v = item.get(k)
-        if v: meta_lines.append(f"{k.upper()}: {v}")
-    if item.get("products"): meta_lines.append("Product: " + ", ".join(item["products"]))
-    if item.get("clouds"):   meta_lines.append("Clouds: " + ", ".join(item["clouds"]))
-    if month:                meta_lines.append(month)
-
-    S.add_text_box(
-        slide, "  •  ".join(meta_lines),
-        left_in=0.6, top_in=6.2, width_in=w_body, height_in=0.7,
-        font_size_pt=14, bold=False, color="E6E8EF"
-    )
 
     # Clickable link (small callout)
     url = item.get("url")
@@ -369,6 +358,7 @@ def build(
     cover_dates: str = cast(str, assets.get("cover_dates") or (month or ""))
     logo1: str = cast(str, assets.get("logo") or "")
     logo2: str = cast(str, assets.get("logo2") or "")
+    
     S.add_cover_slide(prs, assets, cover_title, cover_dates, logo1, logo2)
     S.add_agenda_slide(prs, assets)
 
@@ -437,8 +427,6 @@ if __name__ == "__main__":
     ap.add_argument("--logo", default="")
     ap.add_argument("--logo2", default="")
     ap.add_argument("--rail_width", type=float, default=None)
-    ap.add_argument("--icon_rocket", dest="icon_rocket", default="")
-    ap.add_argument("--icon_preview", dest="icon_preview", default="")
     ap.add_argument("--debug_dump", default="")
     args = ap.parse_args()
 
@@ -452,9 +440,8 @@ if __name__ == "__main__":
         "cover_title": args.cover_title,
         "cover_dates": args.cover_dates,
         "logo": args.logo,
-        "logo2": args.logo2,
-        "icon_rocket": args.icon_rocket,
-        "icon_preview": args.icon_preview
+        "logo2": args.logo2
+
     }
     dbg = args.debug_dump or None
 
