@@ -1,0 +1,48 @@
+# style_template.yaml — styling + defaults for deck generation
+#
+# Absolute paths are recommended. Leave any value blank to skip.
+# Colors are hex *without* the leading '#'.
+
+theme:
+  background_hex: "1B0B2E"    # not directly used by builder; for reference
+  rail_default_hex: "0F172A"  # used if product_palette has no match
+  text_hex: "FFFFFF"
+  meta_text_hex: "E6E8EF"
+
+# Optional default images. CLI args override these.
+assets:
+  cover:      "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\cover.png"
+  agenda:     "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\agenda.png"
+  separator:  "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\separator.png"
+  conclusion: "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\conclusion.png"
+  thankyou:   "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\thankyou.png"
+  brand_bg:   "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\background.png"
+  logo:       "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\logo1.png"
+  logo2:      "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\logo2.png"
+
+# Optional icons drawn in the rail depending on status.
+icons:
+  rocket:  "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\rocket.png"   # GA / Rolling out
+  preview: "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\preview.png" # Preview / In development
+
+# Rail color overrides by product (case-insensitive keys).
+product_palette:
+  teams:      "5B21B6"
+  sharepoint: "065F46"
+  onedrive:   "1D4ED8"
+  exchange:   "0F172A"
+  outlook:    "1F2937"
+  security:   "14532D"
+  defender:   "14532D"
+  purview:    "065F46"
+  entra:      "1D4ED8"
+
+# Default rail width (inches) when not specified on CLI.
+defaults:
+  rail_width: 3.5
+
+# Text blocks (not all fields are consumed by the builder; provided for future styling)
+text:
+  title_pt: 34
+  body_pt: 20
+  footer_pt: 14
