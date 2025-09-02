@@ -1,38 +1,25 @@
-param(
-  [string]$Month = "September 2025"
-)
+  
+& "C:\technical_update_briefings\tools\ppt_builder\.venv\Scripts\python.exe" `
+  "C:\technical_update_briefings\tools\ppt_builder\generate_deck.py" `
+  -i "C:\technical_update_briefings\tools\roadmap\RoadmapPrimarySource.html" `
+     "C:\technical_update_briefings\tools\message_center\MessageCenterBriefingSuppliments.html" `
+  -o "C:\technical_update_briefings\RoadmapDeck_AutoGen.pptx" `
+  --style "C:\technical_update_briefings\tools\ppt_builder\style_template.yaml" `
+  --month "September 2025" `
+  --cover "C:\technical_update_briefings\tools\ppt_builder\assets\cover.png" `
+  --agenda-bg "C:\technical_update_briefings\tools\ppt_builder\assets\agenda.png" `
+  --separator "C:\technical_update_briefings\tools\ppt_builder\assets\separator.png" `
+  --conclusion-bg "C:\technical_update_briefings\tools\ppt_builder\assets\conclusion.png" `
+  --thankyou "C:\technical_update_briefings\tools\ppt_builder\assets\thankyou.png" `
+  --brand-bg "C:\technical_update_briefings\tools\ppt_builder\assets\background.png" `
+  --logo "C:\technical_update_briefings\tools\ppt_builder\assets\logo1.png" `
+  --logo2 "C:\technical_update_briefings\tools\ppt_builder\assets\logo2.png" `
+  --icon-rocket  "C:\technical_update_briefings\tools\ppt_builder\assets\rocket.png" `
+  --icon-preview "C:\technical_update_briefings\tools\ppt_builder\assets\preview.png" `
+  --icon-dev    "C:\technical_update_briefings\tools\ppt_builder\assets\dev.png" `
+  --icon-endusers "C:\technical_update_briefings\tools\ppt_builder\assets\audience_end_users.png" `
+  --icon-admins   "C:\technical_update_briefings\tools\ppt_builder\assets\audience_admins.png" `
+  --rail-width 3.5 `
+  --debug-dump "$env:TEMP\items.json"
+  
 
-$Root     = "C:\technical_update_briefings"
-$Builder  = Join-Path $Root "tools\ppt_builder"
-$Roadmap  = Join-Path $Root "tools\roadmap\RoadmapPrimarySource.html"
-$MC       = Join-Path $Root "tools\message_center\MessageCenterBriefingSuppliments.html"
-
-$Assets   = Join-Path $Builder "assets"
-$Style    = Join-Path $Builder "style_template.yaml"
-$Cover    = Join-Path $Assets  "cover.png"
-$Agenda   = Join-Path $Assets  "agenda.png"
-$Sep      = Join-Path $Assets  "separator.png"
-$Conc     = Join-Path $Assets  "conclusion.png"
-$Thx      = Join-Path $Assets  "thankyou.png"
-$Logo1    = Join-Path $Assets  "logo1.png"
-$Logo2    = Join-Path $Assets  "logo2.png"
-$BrandBG  = Join-Path $Assets  "background.png"
-$Rocket   = Join-Path $Assets  "rocket.png"
-$Preview  = Join-Path $Assets  "preview.png"
-
-$Py       = Join-Path $Builder ".venv\Scripts\python.exe"
-$Gen      = Join-Path $Builder "generate_deck.py"
-$Out      = Join-Path $Root ("RoadmapDeck_AutoGen_{0}.pptx" -f (Get-Date -f "yyyyMMdd_HHmmss"))
-
-& $Py $Gen `
-  -i $Roadmap $MC `
-  -o $Out `
-  --style $Style `
-  --month $Month `
-  --cover $Cover --agenda $Agenda --separator $Sep `
-  --conclusion $Conc --thankyou $Thx `
-  --logo $Logo1 --logo2 $Logo2 `
-  --brand-bg $BrandBG `
-  --icon-rocket $Rocket `
-  --icon-preview $Preview `
-  --rail-width 3.5

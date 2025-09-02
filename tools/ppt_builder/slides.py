@@ -5,6 +5,11 @@ from pptx.enum.text import PP_ALIGN
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 
+try:
+    # not all python-pptx builds expose this; guard it
+    from pptx.enum.text import MSO_AUTO_SIZE
+except Exception:
+    MSO_AUTO_SIZE = None
 # -------------------- basics --------------------
 
 def inches_to_emu(x: float) -> int:
@@ -93,6 +98,7 @@ def add_full_slide_picture(slide, prs, image_path: str):
     """Canonical wrapper used by run_build; delegates to 'add_full_bg'."""
     add_full_bg(slide, image_path)
 
+
 def add_title_box(slide, text: str, *, left_in: float, top_in: float, width_in: float, height_in: float,
                   font_size_pt: int = 60, bold: bool = True, color: str = "FFFFFF", align=PP_ALIGN.LEFT):
     """Canonical wrapper; positions like old API but uses 'add_title' styling."""
@@ -107,17 +113,42 @@ def add_title_box(slide, text: str, *, left_in: float, top_in: float, width_in: 
     r.font.name = "Segoe UI Semibold"
     r.font.color.rgb = RGBColor.from_string(_hex(color))
 
-def add_text_box(slide, text: str, *, left_in: float, top_in: float, width_in: float, height_in: float,
-                 font_size_pt: int = 18, bold: bool = False, color: str = "FFFFFF", align=PP_ALIGN.LEFT):
-    tb = slide.shapes.add_textbox(Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in))
-    tf = tb.text_frame; tf.clear(); tf.word_wrap = True
-    p = tf.paragraphs[0]; p.alignment = align
-    r = p.add_run()
-    r.text = text or ""
-    r.font.size = Pt(font_size_pt)
-    r.font.bold = bool(bold)
-    r.font.name = "Segoe UI"
-    r.font.color.rgb = RGBColor.from_string(_hex(color))
+
+
+
+def add_text_box(
+    slide,
+    text: str,
+    left_in: float, top_in: float, width_in: float, height_in: float,
+    font_size_pt: int = 20,
+    color: str = "FFFFFF",
+    bold: bool = False,
+    align: PP_ALIGN | None = None,
+    auto_height: bool = False,     # ← NEW (default keeps old behavior)
+):
+    """Add a wrapped text box. If auto_height=True, the shape grows to fit text."""
+    shp = slide.shapes.add_textbox(
+        Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in)
+    )
+    tf = shp.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = text or ""
+    run.font.size = Pt(font_size_pt)
+    run.font.bold = bool(bold)
+    run.font.color.rgb = RGBColor.from_string(color.replace("#",""))
+    if align is not None:
+        p.alignment = align
+    tf.word_wrap = True
+
+    if auto_height:
+        # Grow the shape vertically to fit the text without shrinking font size
+        tf.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
+
+    return shp
+
+
 
 def add_cover_slide(prs, assets: dict, cover_title: str, cover_dates: str, logo1_path: str, logo2_path: str):
     slide = prs.slides.add_slide(prs.slide_layouts[6])

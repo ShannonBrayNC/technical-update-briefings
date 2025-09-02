@@ -1,48 +1,50 @@
-# style_template.yaml — styling + defaults for deck generation
-#
-# Absolute paths are recommended. Leave any value blank to skip.
-# Colors are hex *without* the leading '#'.
+# style_template.yaml
+meta:
+  name: "TUB Deck Style"
+  version: "1.0"
 
-theme:
-  background_hex: "1B0B2E"    # not directly used by builder; for reference
-  rail_default_hex: "0F172A"  # used if product_palette has no match
-  text_hex: "FFFFFF"
-  meta_text_hex: "E6E8EF"
+rail:
+  # default rail width in inches; CLI --rail-width overrides
+  width: 3.5
 
-# Optional default images. CLI args override these.
+cover:
+  title: "M365 Technical Update Briefing"
+  dates: ""   # left blank -> we’ll use --month if provided
+
 assets:
-  cover:      "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\cover.png"
-  agenda:     "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\agenda.png"
-  separator:  "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\separator.png"
-  conclusion: "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\conclusion.png"
-  thankyou:   "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\thankyou.png"
-  brand_bg:   "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\background.png"
-  logo:       "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\logo1.png"
-  logo2:      "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\logo2.png"
+  # You can leave these blank and pass them via CLI instead
+  cover:      "assets/cover.png"
+  agenda:     "assets/agenda.png"
+  separator:  "assets/separator.png"
+  conclusion: "assets/conclusion.png"
+  thankyou:   "assets/thankyou.png"
+  brand_bg:   "assets/background.png"
+  logo:       "assets/logo1.png"
+  logo2:      "assets/logo2.png"
 
-# Optional icons drawn in the rail depending on status.
 icons:
-  rocket:  "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\rocket.png"   # GA / Rolling out
-  preview: "C:\\technical_update_briefings\\tools\\ppt_builder\\assets\\preview.png" # Preview / In development
+  rocket:             "assets/rocket.png"
+  preview:            "assets/preview.png"
+  audience_end_users: "assets/audience_end_users.png"
+  audience_admins:    "assets/audience_admins.png"
 
-# Rail color overrides by product (case-insensitive keys).
+# Product -> rail color mapping (hex; no '#')
 product_palette:
-  teams:      "5B21B6"
-  sharepoint: "065F46"
-  onedrive:   "1D4ED8"
-  exchange:   "0F172A"
-  outlook:    "1F2937"
-  security:   "14532D"
-  defender:   "14532D"
-  purview:    "065F46"
-  entra:      "1D4ED8"
+  teams: "4F46E5"
+  sharepoint: "16A34A"
+  onedrive: "0EA5E9"
+  exchange: "F97316"
+  outlook: "2563EB"
+  excel: "22C55E"
+  word: "3B82F6"
+  powerpoint: "F97316"
+  forms: "10B981"
+  intune: "0891B2"
+  defender: "7C3AED"
+  viva: "DC2626"
+  azuread: "1F2937"
+  default: "0F172A"
 
-# Default rail width (inches) when not specified on CLI.
-defaults:
-  rail_width: 3.5
-
-# Text blocks (not all fields are consumed by the builder; provided for future styling)
-text:
-  title_pt: 34
-  body_pt: 20
-  footer_pt: 14
+typography:
+  title_pt: 36   # run_build clamps the box; this is for reference
+  body_pt: 18
